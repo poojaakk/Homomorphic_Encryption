@@ -13,15 +13,20 @@ GET  /decrypt           – decrypt the last ciphertext in the store
 GET  /logs              – in-memory log ring-buffer (optional ?category= filter)
 GET  /status            – system health (context, Kafka, store size)
 GET  /context           – active CKKS/BFV parameter set
+POST /video/process     – upload video → frame extraction → HE smoothing
+GET  /video/status      – current video pipeline state
 WS   /ws                – push live events to all connected dashboards
 
 WebSocket event types
 ---------------------
-  stream      – new encrypted sample ingested from the upload pipeline
-  kafka_ack   – Kafka consumer confirmed receipt of a message
-  bootstrap   – a noise refresh was performed (auto or manual)
-  noise       – periodic noise snapshot pushed every ~2 s
-  error       – pipeline error (Kafka unreachable, etc.)
+  stream          – new encrypted sample ingested (CSV pipeline)
+  kafka_ack       – Kafka consumer confirmed receipt
+  bootstrap       – CSV-mode ciphertext refresh
+  noise           – periodic noise snapshot (every 2 s)
+  video_frame     – per-frame noise snapshot during video processing
+  video_bootstrap – bootstrap fired during video processing
+  video_stream    – one video batch completed
+  error           – pipeline error
 """
 
 from __future__ import annotations
@@ -35,7 +40,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import tenseal as ts
-from fastapi import FastAPI, File, Form, Query, UploadFile, WebSocket
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
 from bootstrapping import bootstrap
@@ -64,8 +69,14 @@ from models import (
     NoiseResponse,
     StatusResponse,
     UploadResponse,
+    VideoProcessResponse,
+    VideoStatusResponse,
+    VideoInfoModel,
+    VideoBatchResult,
+    VideoNoiseSnapshot,
 )
 from noise_manager import NoiseManager
+from video_processor import process_video, save_upload_to_temp, get_video_info
 from ws_hub import WebSocketHub
 
 # ---------------------------------------------------------------------------
@@ -78,12 +89,23 @@ KAFKA_CONSUMER_GROUP = os.environ.get("KAFKA_CONSUMER_GROUP", "he-backend")
 # ---------------------------------------------------------------------------
 ingest_queue: "asyncio.Queue[List[float]]" = asyncio.Queue()
 hub = WebSocketHub()
-noise_manager = NoiseManager()
+# CSV-mode noise manager (mode="csv", threshold 50-80)
+noise_manager = NoiseManager(mode="csv")
 encrypted_store: List[Any] = []
 current_context: Optional[ts.Context] = None
 producer = None
 consumer_thread: Optional[ConsumerThread] = None
 main_loop: Optional[asyncio.AbstractEventLoop] = None
+
+# ---------------------------------------------------------------------------
+# Video processing state
+# ---------------------------------------------------------------------------
+_video_processing: bool = False
+_video_last_result: Optional[Dict] = None
+_video_last_error: Optional[str] = None
+# Dedicated video-mode noise manager (mode="video", threshold 200-500).
+# Kept separate so CSV and video noise budgets don't interfere with each other.
+_video_noise_manager = NoiseManager(mode="video")
 
 
 # ---------------------------------------------------------------------------
@@ -493,3 +515,202 @@ def context_info():
     if not params:
         return {"error": "Context not initialised"}
     return ContextResponse(**params)
+
+
+# ---------------------------------------------------------------------------
+# Video streaming endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/video/status", response_model=VideoStatusResponse)
+def video_status():
+    """Report the state of the video processing pipeline."""
+    global _video_processing, _video_last_result, _video_last_error
+    result = _video_last_result
+    return VideoStatusResponse(
+        ready=current_context is not None,
+        processing=_video_processing,
+        last_filename=result["info"]["filename"] if result else None,
+        last_total_frames=result["total_frames_extracted"] if result else None,
+        last_batches=result["total_batches"] if result else None,
+        last_bootstraps=result["total_bootstraps"] if result else None,
+        error=_video_last_error,
+    )
+
+
+@app.post("/video/process", response_model=VideoProcessResponse)
+async def video_process(
+    file: UploadFile = File(...),
+    noise_std: float = Form(5.0),
+):
+    """
+    Upload a short video and run the full HE pipeline.
+
+    What happens inside:
+      1. Save the upload to a temp file.
+      2. OpenCV reads every frame sequentially.
+      3. Each frame → grayscale → mean pixel intensity (one float per frame).
+      4. Optional Gaussian noise injected into the signal.
+      5. Split into 60-frame batches.
+      6. Per frame: encrypt the value (CKKS), apply HE scalar-multiply ×0.2
+         five times, then HE-add the five scaled ciphertexts.
+      7. After EVERY frame's computation: check if noise > threshold.
+         If yes → bootstrap (reset counter), emit video_bootstrap WS event.
+      8. Decrypt only the final smoothed result per frame.
+      9. MAE/MSE validation against plaintext reference.
+     10. Per-frame video_frame WS events so the noise chart updates live.
+    """
+    global _video_processing, _video_last_result, _video_last_error, _video_noise_manager
+
+    if current_context is None:
+        raise HTTPException(status_code=503, detail="HE context not ready")
+    if _video_processing:
+        raise HTTPException(status_code=409, detail="A video is already being processed")
+
+    filename = file.filename or "upload.mp4"
+    ext = os.path.splitext(filename)[1].lower()
+    supported = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
+    if ext not in supported:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported video format '{ext}'. Supported: {', '.join(sorted(supported))}",
+        )
+
+    _video_processing = True
+    _video_last_error = None
+    _video_last_result = None
+
+    # Fresh noise manager for each video so budgets don't accumulate across runs
+    _video_noise_manager = NoiseManager(mode="video")
+
+    tmp_path: Optional[str] = None
+
+    try:
+        content = await file.read()
+        if len(content) == 0:
+            raise ValueError("Uploaded file is empty")
+
+        loop = asyncio.get_running_loop()
+        tmp_path = await loop.run_in_executor(
+            None, save_upload_to_temp, content, filename
+        )
+        log(f"Video upload saved: {filename} ({len(content)//1024} KB)", "api")
+
+        # Run the heavy synchronous pipeline in a thread executor so we
+        # don't block the asyncio event loop (WebSocket heartbeats keep firing).
+        result = await loop.run_in_executor(
+            None,
+            _run_video_pipeline,
+            tmp_path,
+            noise_std,
+        )
+
+        _video_last_result = result
+
+        log(
+            f"Video processed: {filename} | "
+            f"{result['total_frames_extracted']} frames | "
+            f"{result['total_batches']} batches | "
+            f"{result['total_bootstraps']} bootstraps | "
+            f"MAE(HE vs PT)={result['overall_mae_he_vs_plain']:.6f}",
+            "api",
+        )
+
+        return VideoProcessResponse(**result)
+
+    except (FileNotFoundError, ValueError) as exc:
+        _video_last_error = str(exc)
+        log(f"Video processing error: {exc}", "error")
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        _video_last_error = str(exc)
+        log(f"Video processing unexpected error: {exc}", "error")
+        raise HTTPException(status_code=500, detail=f"Processing failed: {exc}")
+    finally:
+        _video_processing = False
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def _run_video_pipeline(tmp_path: str, noise_std: float) -> Dict:
+    """
+    Synchronous wrapper — runs in a thread executor.
+
+    Uses _video_noise_manager (video mode, threshold 200-500) so that:
+    - Bootstrap fires every ~250 noise units (roughly every 10 frames).
+    - CSV-mode noise_manager is completely unaffected.
+
+    The on_emit callback uses run_coroutine_threadsafe so WS events
+    (video_frame, video_bootstrap, video_stream) are pushed to the
+    dashboard in real-time while the pipeline is still running.
+    """
+    def _emit(payload: dict) -> None:
+        """Thread-safe WS publish from the executor thread."""
+        if main_loop and main_loop.is_running():
+            asyncio.run_coroutine_threadsafe(hub.publish(payload), main_loop)
+
+    vr = process_video(
+        video_path=tmp_path,
+        noise_std=noise_std,
+        context=current_context,
+        noise_mgr=_video_noise_manager,
+        on_emit=_emit,
+    )
+
+    # Serialise BatchResult objects to plain dicts
+    batches_dicts = []
+    for b in vr.batches:
+        batches_dicts.append({
+            "batch_index":        b.batch_index,
+            "frame_indices":      b.frame_indices,
+            "original":           b.original,
+            "noisy":              b.noisy,
+            "he_smoothed":        b.he_smoothed,
+            "plaintext_smoothed": b.plaintext_smoothed,
+            "mae":                b.mae,
+            "mse":                b.mse,
+            "noise_units_used":   b.noise_units_used,
+            "bootstraps_in_batch": b.bootstraps_in_batch,
+        })
+
+    # Serialise per-frame noise snapshots for the noise chart
+    snapshots = [
+        {
+            "frame_idx":    s["frame_idx"],
+            "noise":        s["noise"],
+            "threshold":    s["threshold"],
+            "pct_used":     s["pct_used"],
+            "bootstrapped": s["bootstrapped"],
+            "bootstraps":   s["bootstraps"],
+        }
+        for s in vr.all_noise_snapshots
+    ]
+
+    return {
+        "status":                  "ok",
+        "info": {
+            "filename":     vr.info.filename,
+            "fps":          vr.info.fps,
+            "total_frames": vr.info.total_frames,
+            "duration_sec": vr.info.duration_sec,
+            "width":        vr.info.width,
+            "height":       vr.info.height,
+        },
+        "total_frames_extracted":    vr.total_frames_extracted,
+        "total_batches":             vr.total_batches,
+        "total_bootstraps":          vr.total_bootstraps,
+        "noise_std":                 vr.noise_std,
+        "all_frame_indices":         vr.all_frame_indices,
+        "all_original":              vr.all_original,
+        "all_noisy":                 vr.all_noisy,
+        "all_he_smoothed":           vr.all_he_smoothed,
+        "all_plaintext_smoothed":    vr.all_plaintext_smoothed,
+        "all_noise_snapshots":       snapshots,
+        "batches":                   batches_dicts,
+        "overall_mae_he_vs_plain":   vr.overall_mae_he_vs_plain,
+        "overall_mse_he_vs_plain":   vr.overall_mse_he_vs_plain,
+        "overall_mae_noisy_vs_orig": vr.overall_mae_noisy_vs_orig,
+        "overall_mse_noisy_vs_orig": vr.overall_mse_noisy_vs_orig,
+    }

@@ -82,6 +82,7 @@ h1 {
     margin: 20px 0;
   }
 }
+/* Inside the app header the .titleH1 class overrides the global h1 size */
 h2 {
   font-size: 24px;
   line-height: 118%;
