@@ -28,17 +28,13 @@ export const uploadCsv = (file, column) => {
 export const getVideoStatus = () => axios.get(`${API}/video/status`);
 
 /**
- * POST /video/process — upload a video file and run the full HE pipeline.
- * @param {File}   file      - video file object from <input type="file">
- * @param {number} noiseStd  - Gaussian noise std-dev  (0 = no noise, default 5)
- * @param {function} onUploadProgress - optional axios progress callback
+ * POST /video/process — HE stream on every frame (CKKS computation noise).
  */
-export const processVideo = (file, noiseStd = 5.0, onUploadProgress) => {
+export const processVideo = (file, onUploadProgress) => {
   const form = new FormData();
   form.append("file", file);
-  form.append("noise_std", String(noiseStd));
   return axios.post(`${API}/video/process`, form, {
-    timeout: 300_000,          // 5-minute timeout for large videos
+    timeout: 600_000,
     onUploadProgress,
   });
 };

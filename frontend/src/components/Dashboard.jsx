@@ -7,9 +7,8 @@
  * CSV mode panels (original, completely unchanged):
  *  Header → Upload → Charts (Streaming + Noise side-by-side) → Controls → Logs
  *
- * Video mode panels (new):
- *  Header → VideoUpload → Charts (Signal Comparison + Noise Budget side-by-side)
- *         → VideoStatus → Logs
+ * Video mode panels:
+ *  Header → VideoUpload → playback → computations + noise/bootstrap + graph → Logs
  *
  * The mode selector bar sits between the header and the content panels.
  * Logs are shared across both modes.
@@ -20,9 +19,8 @@ import Logs            from "./Logs";
 import NoiseChart      from "./NoiseChart";
 import StreamingChart  from "./StreamingChart";
 import Upload          from "./Upload";
-import VideoChart      from "./VideoChart";
+import VideoCompare    from "./VideoCompare";
 import VideoNoiseChart from "./VideoNoiseChart";
-import VideoStatus     from "./VideoStatus";
 import VideoUpload     from "./VideoUpload";
 
 export default function Dashboard({
@@ -116,20 +114,17 @@ export default function Dashboard({
       ═══════════════════════════════════════════════════════════════ */}
       {mode === "video" && (
         <>
-          {/* Upload + noise-std control */}
+          {/* Upload */}
           <section className="section">
             <VideoUpload onResult={onVideoResult} onNewLog={onNewLog} />
           </section>
 
-          {/* Signal comparison chart + Noise budget chart side-by-side */}
-          <section className="grid">
-            <VideoChart      result={videoResult} />
-            <VideoNoiseChart result={videoResult} liveData={videoLiveNoise} />
+          <section className="section">
+            <VideoCompare result={videoResult} />
           </section>
 
-          {/* Video metadata + batch breakdown + validation metrics */}
           <section className="section">
-            <VideoStatus result={videoResult} />
+            <VideoNoiseChart result={videoResult} liveData={videoLiveNoise} />
           </section>
         </>
       )}

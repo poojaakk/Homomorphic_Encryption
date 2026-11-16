@@ -1,0 +1,12 @@
+Metric,Experiment A (Plaintext),Experiment B (Unmanaged HE),Experiment C (Adaptive HE)
+Evaluated Records,50,50,50
+Encryption Latency (ms),0.00,1.70,1.69
+HE Computation Latency (ms),0.0017,1.77,1.75
+Decryption Latency (ms),0.00,0.13,0.13
+Total Processing Latency (ms),0.0017,3.60,3.57
+Mean Absolute Error (MAE),0.00 (Exact),8.609e-03,8.609e-03
+Max Absolute Error,0.00,8.771e-03,8.771e-03
+Mean Relative Error,0.00,6.217e-07,6.215e-07
+Root Mean Square Error (RMSE),0.00,8.609e-03,8.609e-03
+Successful Decryptions,50/50,50/50,50/50
+Adaptive Interventions,0,0 (None),50

@@ -6,7 +6,7 @@
  * Features:
  *  - Category filter tabs: All | api | compute | noise | kafka | error | system
  *  - Colour-coded badges per category
- *  - Auto-scrolls to the latest entry
+ *  - Scrolls inside the log panel only (does not move the page)
  *  - Shows the last 100 entries maximum
  */
 
@@ -29,15 +29,17 @@ function catStyle(cat) {
 
 export default function Logs({ entries = [] }) {
   const [filter, setFilter] = useState("all");
-  const bottomRef = useRef(null);
+  const listRef = useRef(null);
 
   const visible = (
     filter === "all" ? entries : entries.filter((e) => e.category === filter)
   ).slice(-100);
 
-  // Auto-scroll whenever new entries arrive.
+  // Keep the latest line visible inside the panel only — never scroll the page.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const el = listRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
   }, [visible.length]);
 
   return (
@@ -61,7 +63,7 @@ export default function Logs({ entries = [] }) {
       </div>
 
       {/* Log entries */}
-      <div className="logScroll">
+      <div className="logScroll" ref={listRef}>
         {visible.length === 0 ? (
           <div className="muted logEmpty">No log entries yet.</div>
         ) : (
@@ -81,7 +83,6 @@ export default function Logs({ entries = [] }) {
             );
           })
         )}
-        <div ref={bottomRef} />
       </div>
     </div>
   );

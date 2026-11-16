@@ -50,6 +50,8 @@ class EncryptResponse(BaseModel):
     plaintext: List[float]
     dims: int
     ciphertext_preview: str
+    source_column: Optional[str] = None
+    source_row: Optional[int] = None
 
 
 class ComputeResponse(BaseModel):
@@ -115,52 +117,38 @@ class VideoInfoModel(BaseModel):
     height: int
 
 
-class VideoBatchResult(BaseModel):
-    batch_index: int
-    frame_indices: List[int]
-    original: List[float]
-    noisy: List[float]
-    he_smoothed: List[float]
-    plaintext_smoothed: List[float]
-    mae: float
-    mse: float
-    noise_units_used: int
-    bootstraps_in_batch: int = 0
-
-
 class VideoNoiseSnapshot(BaseModel):
-    """Per-frame noise budget snapshot for the video noise chart."""
+    """Per-frame CKKS budget snapshot (crypto noise, not video grain)."""
     frame_idx:    int
     noise:        int
     threshold:    int
     pct_used:     float
     bootstrapped: bool
     bootstraps:   int
+    ops: List[str] = []
+    noise_generated: int = 0
+    noise_reduced: int = 0
+    frame_a: Optional[int] = None
+    frame_b: Optional[int] = None
 
 
 class VideoProcessResponse(BaseModel):
-    """Full result returned by POST /video/process."""
+    """Streaming HE result: all frames + CKKS computation-noise history."""
     status: str
     info: VideoInfoModel
-    total_frames_extracted: int
-    total_batches: int
+    process_width: int
+    process_height: int
+    frames_processed: int
+    truncated: bool
+    fps: float
     total_bootstraps: int
-    noise_std: float
-    # Flattened series for charting  (one entry per frame)
-    all_frame_indices: List[int]
-    all_original: List[float]
-    all_noisy: List[float]
-    all_he_smoothed: List[float]
-    all_plaintext_smoothed: List[float]
-    # Per-frame noise budget history for the noise chart
+    peak_noise: int
+    total_noise_generated: int = 0
+    total_noise_reduced: int = 0
+    computation: str
+    original_frames_jpeg: List[str]
+    result_frames_jpeg: List[str]
     all_noise_snapshots: List[VideoNoiseSnapshot]
-    # Batch-level detail
-    batches: List[VideoBatchResult]
-    # Aggregate validation metrics
-    overall_mae_he_vs_plain: float
-    overall_mse_he_vs_plain: float
-    overall_mae_noisy_vs_orig: float
-    overall_mse_noisy_vs_orig: float
 
 
 class VideoStatusResponse(BaseModel):

@@ -1,0 +1,400 @@
+{
+  "num_records": 50,
+  "experiment_a": {
+    "experiment": "A_Plaintext_Baseline",
+    "num_records": 50,
+    "encryption_latency_ms": 0.0,
+    "computation_latency_ms": 0.0016583600154262967,
+    "decryption_latency_ms": 0.0,
+    "total_latency_ms": 0.0016583600154262967,
+    "mean_absolute_error": 0.0,
+    "max_absolute_error": 0.0,
+    "mean_relative_error": 0.0,
+    "rmse": 0.0,
+    "successful_decryptions": 50,
+    "failed_results": 0,
+    "adaptive_interventions": 0
+  },
+  "experiment_b": {
+    "experiment": "B_HE_Baseline_No_Adaptive",
+    "num_records": 50,
+    "encryption_latency_ms": 1.7018774800817482,
+    "computation_latency_ms": 1.7652016399006243,
+    "decryption_latency_ms": 0.1342715798818972,
+    "total_latency_ms": 3.6013506998642697,
+    "mean_absolute_error": 0.00860870021935811,
+    "max_absolute_error": 0.008771022138703977,
+    "mean_relative_error": 6.21679634413077e-07,
+    "rmse": 0.00860911026591512,
+    "successful_decryptions": 50,
+    "failed_results": 0,
+    "adaptive_interventions": 0
+  },
+  "experiment_c": {
+    "experiment": "C_Adaptive_HE",
+    "num_records": 50,
+    "encryption_latency_ms": 1.6865776399572496,
+    "computation_latency_ms": 1.754860040055064,
+    "decryption_latency_ms": 0.1314350800748798,
+    "total_latency_ms": 3.5728727600871935,
+    "mean_absolute_error": 0.008608704566339354,
+    "max_absolute_error": 0.008771001332728012,
+    "mean_relative_error": 6.215289944405565e-07,
+    "rmse": 0.008609114665641255,
+    "successful_decryptions": 50,
+    "failed_results": 0,
+    "adaptive_interventions": 50,
+    "intervention_details": [
+      {
+        "intervention_id": 1,
+        "record_id": 1,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.54e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008541189179633157
+      },
+      {
+        "intervention_id": 2,
+        "record_id": 2,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.56e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008562566932194126
+      },
+      {
+        "intervention_id": 3,
+        "record_id": 3,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.58e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008584149517442144
+      },
+      {
+        "intervention_id": 4,
+        "record_id": 4,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.61e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.00861420012673193
+      },
+      {
+        "intervention_id": 5,
+        "record_id": 5,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.61e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008609926648458844
+      },
+      {
+        "intervention_id": 6,
+        "record_id": 6,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.60e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.00859735932367259
+      },
+      {
+        "intervention_id": 7,
+        "record_id": 7,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.59e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008589774824243307
+      },
+      {
+        "intervention_id": 8,
+        "record_id": 8,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.59e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008590631270327442
+      },
+      {
+        "intervention_id": 9,
+        "record_id": 9,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.59e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008590468490862828
+      },
+      {
+        "intervention_id": 10,
+        "record_id": 10,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.59e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008594487674295834
+      },
+      {
+        "intervention_id": 11,
+        "record_id": 11,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.61e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008606955606106475
+      },
+      {
+        "intervention_id": 12,
+        "record_id": 12,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.62e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008618118105731602
+      },
+      {
+        "intervention_id": 13,
+        "record_id": 13,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.62e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.00862407929129933
+      },
+      {
+        "intervention_id": 14,
+        "record_id": 14,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.62e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008624928360406197
+      },
+      {
+        "intervention_id": 15,
+        "record_id": 15,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.64e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.00863557133612737
+      },
+      {
+        "intervention_id": 16,
+        "record_id": 16,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.65e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008651259721022733
+      },
+      {
+        "intervention_id": 17,
+        "record_id": 17,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.67e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008669012187432905
+      },
+      {
+        "intervention_id": 18,
+        "record_id": 18,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.68e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008684602656892757
+      },
+      {
+        "intervention_id": 19,
+        "record_id": 19,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.70e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008702786164650967
+      },
+      {
+        "intervention_id": 20,
+        "record_id": 20,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.71e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008713154170562305
+      },
+      {
+        "intervention_id": 21,
+        "record_id": 21,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.72e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008721363025829518
+      },
+      {
+        "intervention_id": 22,
+        "record_id": 22,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.73e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008727782862064224
+      },
+      {
+        "intervention_id": 23,
+        "record_id": 23,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.73e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008734919862449822
+      },
+      {
+        "intervention_id": 24,
+        "record_id": 24,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.73e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008731191315462787
+      },
+      {
+        "intervention_id": 25,
+        "record_id": 25,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.72e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008722742514502356
+      },
+      {
+        "intervention_id": 26,
+        "record_id": 26,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.71e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008710344971203269
+      },
+      {
+        "intervention_id": 27,
+        "record_id": 27,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.70e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008695553140929863
+      },
+      {
+        "intervention_id": 28,
+        "record_id": 28,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.68e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.00867538625349919
+      },
+      {
+        "intervention_id": 29,
+        "record_id": 29,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.65e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.0086531829831638
+      },
+      {
+        "intervention_id": 30,
+        "record_id": 30,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.64e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008637361903137127
+      },
+      {
+        "intervention_id": 31,
+        "record_id": 31,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.62e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008621857539873263
+      },
+      {
+        "intervention_id": 32,
+        "record_id": 32,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.61e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008605003713643847
+      },
+      {
+        "intervention_id": 33,
+        "record_id": 33,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.59e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008588449379020454
+      },
+      {
+        "intervention_id": 34,
+        "record_id": 34,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.58e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008579690853998265
+      },
+      {
+        "intervention_id": 35,
+        "record_id": 35,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.58e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.0085765625716882
+      },
+      {
+        "intervention_id": 36,
+        "record_id": 36,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.58e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008580220573278651
+      },
+      {
+        "intervention_id": 37,
+        "record_id": 37,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.58e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008583627721575322
+      },
+      {
+        "intervention_id": 38,
+        "record_id": 38,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.59e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008585988883804454
+      },
+      {
+        "intervention_id": 39,
+        "record_id": 39,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.59e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008590373924349795
+      },
+      {
+        "intervention_id": 40,
+        "record_id": 40,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.59e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008592841298789473
+      },
+      {
+        "intervention_id": 41,
+        "record_id": 41,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.59e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008592927529442811
+      },
+      {
+        "intervention_id": 42,
+        "record_id": 42,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.59e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008591770020240013
+      },
+      {
+        "intervention_id": 43,
+        "record_id": 43,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.58e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008577603058631401
+      },
+      {
+        "intervention_id": 44,
+        "record_id": 44,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.56e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008564809192645424
+      },
+      {
+        "intervention_id": 45,
+        "record_id": 45,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.55e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008554310655149288
+      },
+      {
+        "intervention_id": 46,
+        "record_id": 46,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.54e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008543595773343063
+      },
+      {
+        "intervention_id": 47,
+        "record_id": 47,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.53e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008533031666943237
+      },
+      {
+        "intervention_id": 48,
+        "record_id": 48,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.53e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008525562591265964
+      },
+      {
+        "intervention_id": 49,
+        "record_id": 49,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.52e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.008517109874814315
+      },
+      {
+        "intervention_id": 50,
+        "record_id": 50,
+        "action": "CIPHERTEXT_REFRESH_AND_DEPTH_RESET",
+        "reason": "Precision degraded (rolling MAE 8.51e-03 >= threshold 1.00e-04)",
+        "rolling_error_at_intervention": 0.00850567778491203
+      }
+    ]
+  }
+}

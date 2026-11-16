@@ -437,6 +437,46 @@
   color: var(--accent);
 }
 
+.videoOpsBox {
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+}
+.videoOpsTitle {
+  font-size: 12px;
+  color: var(--text-h);
+  margin-bottom: 6px;
+}
+.videoOpsList {
+  margin: 0 0 8px;
+  padding-left: 18px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text-h);
+}
+.videoOpsRecent {
+  max-height: 120px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  font-family: var(--mono);
+}
+.videoOpsRecentRow {
+  display: grid;
+  grid-template-columns: 42px 1fr auto auto;
+  gap: 8px;
+  align-items: baseline;
+  padding: 2px 0;
+  color: var(--text);
+}
+.videoOpsFrame {
+  color: var(--accent);
+}
+
 /* ── Video batch table ───────────────────────────────────────────────────── */
 .videoTable {
   width: 100%;
@@ -467,4 +507,65 @@
 }
 .videoTable tbody tr:hover td {
   background: rgba(255, 255, 255, 0.03);
+}
+
+.videoCompareGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.videoClipTitle {
+  font-size: 12px;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.videoClipImg {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #111;
+  image-rendering: auto;
+}
+
+@media (max-width: 720px) {
+  .videoCompareGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.videoPair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.videoPane {
+  margin: 0;
+}
+.videoPane img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: #111;
+  image-rendering: auto;
+}
+.videoPane figcaption {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text);
+  text-align: center;
+}
+.denoiseBanner {
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--accent-border);
+  background: var(--accent-bg);
+  font-size: 13px;
+  color: var(--text-h);
 }

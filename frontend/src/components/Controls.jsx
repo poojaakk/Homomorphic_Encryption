@@ -61,7 +61,7 @@ export default function Controls({ onNewLog }) {
     <div className="card">
       <div className="cardHeader">
         <h2>Controls</h2>
-        <span className="muted">operate on the encrypted store</span>
+        <span className="muted">operates on the uploaded CSV column</span>
       </div>
 
       <div className="row">

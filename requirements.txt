@@ -1,0 +1,5 @@
+tenseal==0.3.16
+pandas>=2.0.0
+numpy>=1.23.0
+matplotlib>=3.10.0
+kafka-python==2.2.15

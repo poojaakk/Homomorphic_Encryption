@@ -34,7 +34,9 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
@@ -71,17 +73,14 @@ from models import (
     UploadResponse,
     VideoProcessResponse,
     VideoStatusResponse,
-    VideoInfoModel,
-    VideoBatchResult,
-    VideoNoiseSnapshot,
 )
 from noise_manager import NoiseManager
-from video_processor import process_video, save_upload_to_temp, get_video_info
+from video_processor import process_video, save_upload_to_temp
 from ws_hub import WebSocketHub
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
+# CSV/static HE + Kafka stream (do not share this pool with the video pipeline)
+_csv_he_lock = threading.Lock()
+_csv_stream_ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="csv-stream")
 KAFKA_CONSUMER_GROUP = os.environ.get("KAFKA_CONSUMER_GROUP", "he-backend")
 
 # ---------------------------------------------------------------------------
@@ -92,6 +91,9 @@ hub = WebSocketHub()
 # CSV-mode noise manager (mode="csv", threshold 50-80)
 noise_manager = NoiseManager(mode="csv")
 encrypted_store: List[Any] = []
+csv_values: List[float] = []
+csv_column: str = ""
+csv_cursor: int = 0
 current_context: Optional[ts.Context] = None
 producer = None
 consumer_thread: Optional[ConsumerThread] = None
@@ -118,8 +120,17 @@ def _generate_context() -> None:
     log("HE context initialised (CKKS, poly_modulus=8192, depth=3)", "system")
 
 
-def _deserialize_ckks_vector(ctx: ts.Context, raw: bytes) -> Any:
-    return ts.ckks_vector_from(ctx, raw)
+def _next_csv_values(n: int) -> List[tuple[int, float]]:
+    """Take the next n numbers from the uploaded CSV column (wraps around)."""
+    global csv_cursor
+    if not csv_values:
+        return []
+    out: List[tuple[int, float]] = []
+    for _ in range(n):
+        idx = csv_cursor % len(csv_values)
+        out.append((idx, csv_values[idx]))
+        csv_cursor += 1
+    return out
 
 
 def _bootstrap_and_notify(label: str = "auto") -> Dict[str, Any]:
@@ -145,30 +156,39 @@ def _bootstrap_and_notify(label: str = "auto") -> Dict[str, Any]:
 # Producer loop  – reads from ingest_queue, encrypts, publishes to Kafka
 # ---------------------------------------------------------------------------
 
+def _csv_stream_one(sample: List[float], prod, message_key: str):
+    """Encrypt one CSV sample and optionally publish to Kafka. CSV path only."""
+    with _csv_he_lock:
+        enc = encrypt_data(current_context, sample)
+        raw = serialize_ciphertext(enc)
+    if prod is None:
+        return enc, False
+    produce_encrypted_value(
+        prod,
+        raw,
+        message_key=message_key,
+        meta={"schema": "ckks_vector", "dims": len(sample)},
+    )
+    return enc, True
+
+
 async def _producer_loop() -> None:
-    assert producer is not None
+    global producer
     assert current_context is not None
+    loop = asyncio.get_running_loop()
 
     while True:
         sample: List[float] = await ingest_queue.get()
-
-        # ── Encrypt ──────────────────────────────────────────────────────────
-        enc = encrypt_data(current_context, sample)
-        encrypted_store.append(enc)
-        noise_manager.increase_noise("encrypt")
-
-        # ── Publish to Kafka ──────────────────────────────────────────────────
         message_key = uuid.uuid4().hex
         kafka_ok = True
+        prod = producer
         try:
-            produce_encrypted_value(
-                producer,
-                serialize_ciphertext(enc),
-                message_key=message_key,
-                meta={"schema": "ckks_vector", "dims": len(sample)},
+            enc, kafka_ok = await loop.run_in_executor(
+                _csv_stream_ex, _csv_stream_one, sample, prod, message_key
             )
         except Exception as exc:
             kafka_ok = False
+            producer = None
             log(f"Kafka produce failed: {exc}", "kafka")
             await hub.publish(
                 {
@@ -176,22 +196,22 @@ async def _producer_loop() -> None:
                     "message": "Kafka produce failed – is docker-compose up?",
                 }
             )
+            continue
 
-        # ── Noise tracking per stream message ─────────────────────────────────
+        encrypted_store.append(enc)
+        noise_manager.increase_noise("encrypt")
         noise_manager.increase_noise("stream")
 
-        # ── Adaptive bootstrap check ──────────────────────────────────────────
         bootstrap_info: Optional[Dict] = None
         if noise_manager.check_threshold():
             bootstrap_info = _bootstrap_and_notify(label="auto")
 
-        # ── Push stream event to dashboard ────────────────────────────────────
         nm = noise_manager.summary()
         await hub.publish(
             {
                 "type": "stream",
                 "message_key": message_key,
-                "data": sample,           # plaintext for charting; Kafka carries only ciphertext
+                "data": sample,
                 "kafka_ok": kafka_ok,
                 "noise": nm["noise"],
                 "threshold": nm["threshold"],
@@ -203,6 +223,7 @@ async def _producer_loop() -> None:
                 "refresh_after": bootstrap_info["after"] if bootstrap_info else None,
             }
         )
+        await asyncio.sleep(0)
 
 
 # ---------------------------------------------------------------------------
@@ -249,23 +270,49 @@ async def lifespan(app: FastAPI):
 
     _generate_context()
 
-    producer = build_producer()
-    consumer_thread = ConsumerThread(
-        on_message=_consumer_on_message, group_id=KAFKA_CONSUMER_GROUP
-    )
-    consumer_thread.start()
-    log("Kafka consumer thread started", "kafka")
-
+    # Never block API startup on Kafka — reconnect in the background.
+    kafka_task = asyncio.create_task(_kafka_connect_loop())
     producer_task = asyncio.create_task(_producer_loop())
     heartbeat_task = asyncio.create_task(_noise_heartbeat())
 
     try:
         yield
     finally:
+        kafka_task.cancel()
         producer_task.cancel()
         heartbeat_task.cancel()
         if consumer_thread:
             consumer_thread.stop()
+
+
+async def _kafka_connect_loop() -> None:
+    """Keep trying until the broker is up, then rebuild if it drops."""
+    global producer, consumer_thread
+    while True:
+        if producer is None:
+            try:
+                producer = await asyncio.get_running_loop().run_in_executor(
+                    None, build_producer
+                )
+                log("Kafka producer connected", "kafka")
+            except Exception as exc:
+                producer = None
+                log(f"Kafka producer waiting: {exc}", "kafka")
+
+        alive = (
+            consumer_thread is not None
+            and consumer_thread._thread.is_alive()
+        )
+        if producer is not None and not alive:
+            consumer_thread = ConsumerThread(
+                on_message=_consumer_on_message, group_id=KAFKA_CONSUMER_GROUP
+            )
+            consumer_thread.start()
+            log("Kafka consumer thread started", "kafka")
+            await asyncio.sleep(8.0)
+            continue
+
+        await asyncio.sleep(5.0)
 
 
 # ---------------------------------------------------------------------------
@@ -294,25 +341,62 @@ app.add_middleware(
 # Endpoints
 # ---------------------------------------------------------------------------
 
+def _resolve_csv_column(df: pd.DataFrame, requested: str) -> Optional[str]:
+    """Match a user-typed name against CSV headers (trim + case-insensitive)."""
+    wanted = requested.strip().lower()
+    if not wanted:
+        return None
+    stripped = [(str(c).strip(), c) for c in df.columns]
+    for name, original in stripped:
+        if name.lower() == wanted:
+            return original
+    return None
+
+
 @app.post("/upload", response_model=UploadResponse)
 async def upload(file: UploadFile = File(...), column: str = Form(...)):
+    global csv_values, csv_column, csv_cursor
     content = await file.read()
-    df = pd.read_csv(io.StringIO(content.decode("utf-8")))
+    df = pd.read_csv(io.StringIO(content.decode("utf-8")), skipinitialspace=True)
+    df.columns = [str(c).strip() for c in df.columns]
 
-    if column not in df.columns:
-        log(f"Upload failed – column '{column}' not found", "error")
-        return {"error": f"Column '{column}' not found", "columns": list(df.columns)}
+    available = list(df.columns)
+    resolved = _resolve_csv_column(df, column)
+    if resolved is None:
+        log(f"Upload failed – column '{column}' not found. Available: {available}", "error")
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Column '{column}' not found. "
+                f"Available columns: {', '.join(available)}"
+            ),
+        )
 
+    values: List[float] = []
     pushed = 0
-    for v in df[column].tolist():
+    for v in df[resolved].tolist():
         try:
-            await ingest_queue.put([float(v)])
-            pushed += 1
+            fv = float(v)
         except (TypeError, ValueError):
             continue
+        if pd.isna(fv):
+            continue
+        values.append(fv)
+        await ingest_queue.put([fv])
+        pushed += 1
 
-    log(f"Uploaded {pushed} rows from column '{column}'", "api")
-    return UploadResponse(status="uploaded", column_used=column, rows=pushed)
+    if pushed == 0:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Column '{resolved}' has no numeric values (NaN rows are skipped).",
+        )
+
+    csv_values = values
+    csv_column = resolved
+    csv_cursor = 0
+
+    log(f"Uploaded {pushed} rows from column '{resolved}'", "api")
+    return UploadResponse(status="uploaded", column_used=resolved, rows=pushed)
 
 
 @app.websocket("/ws")
@@ -329,15 +413,23 @@ async def websocket_endpoint(ws: WebSocket):
 def encrypt():
     if current_context is None:
         return {"error": "Context not ready"}
-    data = [10.5, 20.3, 30.7]
-    enc = encrypt_data(current_context, data)
+    taken = _next_csv_values(1)
+    if not taken:
+        return {"error": "Upload a CSV and pick a numeric column first."}
+    row_idx, value = taken[0]
+    data = [value]
+    with _csv_he_lock:
+        enc = encrypt_data(current_context, data)
+        preview = str(enc.serialize()[:32].hex()) + "…"
     encrypted_store.append(enc)
     noise_manager.increase_noise("encrypt")
-    log(f"Manual encrypt: {data}", "api")
+    log(f"Encrypt CSV {csv_column}[{row_idx}] = {value}", "api")
     return EncryptResponse(
         plaintext=data,
         dims=len(data),
-        ciphertext_preview=str(enc.serialize()[:32].hex()) + "…",
+        ciphertext_preview=preview,
+        source_column=csv_column,
+        source_row=row_idx,
     )
 
 
@@ -346,32 +438,38 @@ def compute_add():
     assert current_context is not None
 
     if len(encrypted_store) < 2:
-        log("compute/add – store has < 2 ciphertexts, using demo values", "compute")
-        plain_a = [10.5, 20.3, 30.7]
-        plain_b = [1.0,  2.0,  3.0]
+        if len(csv_values) < 2:
+            log("compute/add – upload a CSV with at least 2 numeric rows", "compute")
+            return {"error": "Upload a CSV with at least 2 numeric values first."}
+        log("compute/add – store has < 2 ciphertexts, using first two CSV values", "compute")
+        plain_a = [csv_values[0]]
+        plain_b = [csv_values[1]]
     else:
         # Decrypt the last two real store entries to get their plaintext values,
         # then re-encrypt both fresh at full scale — this prevents any
         # "scale out of bounds" error no matter how many times add is clicked.
         try:
-            plain_a = decrypt_data(encrypted_store[-1])
-            plain_b = decrypt_data(encrypted_store[-2])
+            with _csv_he_lock:
+                plain_a = decrypt_data(encrypted_store[-1])
+                plain_b = decrypt_data(encrypted_store[-2])
         except Exception:
-            plain_a = [10.5, 20.3, 30.7]
-            plain_b = [1.0,  2.0,  3.0]
+            if len(csv_values) < 2:
+                return {"error": "Could not read store; upload a CSV first."}
+            plain_a = [csv_values[0]]
+            plain_b = [csv_values[1]]
 
     # Pad/trim so both vectors are the same length
     length = min(len(plain_a), len(plain_b))
     plain_a, plain_b = plain_a[:length], plain_b[:length]
 
-    a = encrypt_data(current_context, plain_a)
-    b = encrypt_data(current_context, plain_b)
-
-    try:
-        res, delta = add(a, b, noise_manager)
-    except ComputeError as exc:
-        log(str(exc), "error")
-        return {"error": str(exc)}
+    with _csv_he_lock:
+        a = encrypt_data(current_context, plain_a)
+        b = encrypt_data(current_context, plain_b)
+        try:
+            res, delta = add(a, b, noise_manager)
+        except ComputeError as exc:
+            log(str(exc), "error")
+            return {"error": str(exc)}
 
     encrypted_store.append(res)
     log(f"compute/add: noise delta={delta}, total={noise_manager.get_noise()}", "compute")
@@ -403,31 +501,37 @@ def compute_mul():
     assert current_context is not None
 
     if len(encrypted_store) < 2:
-        log("compute/multiply – store has < 2 ciphertexts, using demo values", "compute")
-        plain_a = [10.5, 20.3, 30.7]
-        plain_b = [2.0,  2.0,  2.0]
+        if len(csv_values) < 2:
+            log("compute/multiply – upload a CSV with at least 2 numeric rows", "compute")
+            return {"error": "Upload a CSV with at least 2 numeric values first."}
+        log("compute/multiply – store has < 2 ciphertexts, using first two CSV values", "compute")
+        plain_a = [csv_values[0]]
+        plain_b = [csv_values[1]]
     else:
         # Decrypt the last two real store entries, re-encrypt fresh at full
         # scale — prevents "scale out of bounds" on every repeated multiply.
         try:
-            plain_a = decrypt_data(encrypted_store[-1])
-            plain_b = decrypt_data(encrypted_store[-2])
+            with _csv_he_lock:
+                plain_a = decrypt_data(encrypted_store[-1])
+                plain_b = decrypt_data(encrypted_store[-2])
         except Exception:
-            plain_a = [10.5, 20.3, 30.7]
-            plain_b = [2.0,  2.0,  2.0]
+            if len(csv_values) < 2:
+                return {"error": "Could not read store; upload a CSV first."}
+            plain_a = [csv_values[0]]
+            plain_b = [csv_values[1]]
 
     # Pad/trim so both vectors are the same length
     length = min(len(plain_a), len(plain_b))
     plain_a, plain_b = plain_a[:length], plain_b[:length]
 
-    a = encrypt_data(current_context, plain_a)
-    b = encrypt_data(current_context, plain_b)
-
-    try:
-        res, delta = multiply(a, b, noise_manager)
-    except ComputeError as exc:
-        log(str(exc), "error")
-        return {"error": str(exc)}
+    with _csv_he_lock:
+        a = encrypt_data(current_context, plain_a)
+        b = encrypt_data(current_context, plain_b)
+        try:
+            res, delta = multiply(a, b, noise_manager)
+        except ComputeError as exc:
+            log(str(exc), "error")
+            return {"error": str(exc)}
 
     encrypted_store.append(res)
     log(f"compute/multiply: noise delta={delta}, total={noise_manager.get_noise()}", "compute")
@@ -484,7 +588,8 @@ def decrypt():
         log("decrypt failed – store is empty", "error")
         return {"error": "No ciphertexts in store"}
     try:
-        result = decrypt_data(encrypted_store[-1])
+        with _csv_he_lock:
+            result = decrypt_data(encrypted_store[-1])
         log(f"Decrypted last ciphertext: {result}", "api")
         return DecryptResponse(result=result, store_size=len(encrypted_store))
     except Exception as exc:
@@ -530,8 +635,8 @@ def video_status():
         ready=current_context is not None,
         processing=_video_processing,
         last_filename=result["info"]["filename"] if result else None,
-        last_total_frames=result["total_frames_extracted"] if result else None,
-        last_batches=result["total_batches"] if result else None,
+        last_total_frames=result.get("frames_processed") if result else None,
+        last_batches=None,
         last_bootstraps=result["total_bootstraps"] if result else None,
         error=_video_last_error,
     )
@@ -540,24 +645,10 @@ def video_status():
 @app.post("/video/process", response_model=VideoProcessResponse)
 async def video_process(
     file: UploadFile = File(...),
-    noise_std: float = Form(5.0),
 ):
     """
-    Upload a short video and run the full HE pipeline.
-
-    What happens inside:
-      1. Save the upload to a temp file.
-      2. OpenCV reads every frame sequentially.
-      3. Each frame → grayscale → mean pixel intensity (one float per frame).
-      4. Optional Gaussian noise injected into the signal.
-      5. Split into 60-frame batches.
-      6. Per frame: encrypt the value (CKKS), apply HE scalar-multiply ×0.2
-         five times, then HE-add the five scaled ciphertexts.
-      7. After EVERY frame's computation: check if noise > threshold.
-         If yes → bootstrap (reset counter), emit video_bootstrap WS event.
-      8. Decrypt only the final smoothed result per frame.
-      9. MAE/MSE validation against plaintext reference.
-     10. Per-frame video_frame WS events so the noise chart updates live.
+    Stream every frame through CKKS encrypt → add last two → scale 0.5.
+    Ciphertext noise from those ops is bootstrapped.  No extra pixel noise.
     """
     global _video_processing, _video_last_result, _video_last_error, _video_noise_manager
 
@@ -601,17 +692,15 @@ async def video_process(
             None,
             _run_video_pipeline,
             tmp_path,
-            noise_std,
         )
 
         _video_last_result = result
 
         log(
-            f"Video processed: {filename} | "
-            f"{result['total_frames_extracted']} frames | "
-            f"{result['total_batches']} batches | "
+            f"Video stream HE: {filename} | "
+            f"{result['frames_processed']} frames | "
             f"{result['total_bootstraps']} bootstraps | "
-            f"MAE(HE vs PT)={result['overall_mae_he_vs_plain']:.6f}",
+            f"peak CKKS noise {result['peak_noise']}",
             "api",
         )
 
@@ -634,62 +723,38 @@ async def video_process(
                 pass
 
 
-def _run_video_pipeline(tmp_path: str, noise_std: float) -> Dict:
-    """
-    Synchronous wrapper — runs in a thread executor.
-
-    Uses _video_noise_manager (video mode, threshold 200-500) so that:
-    - Bootstrap fires every ~250 noise units (roughly every 10 frames).
-    - CSV-mode noise_manager is completely unaffected.
-
-    The on_emit callback uses run_coroutine_threadsafe so WS events
-    (video_frame, video_bootstrap, video_stream) are pushed to the
-    dashboard in real-time while the pipeline is still running.
-    """
+def _run_video_pipeline(tmp_path: str) -> Dict:
+    """Synchronous wrapper — runs in a thread executor."""
     def _emit(payload: dict) -> None:
-        """Thread-safe WS publish from the executor thread."""
         if main_loop and main_loop.is_running():
             asyncio.run_coroutine_threadsafe(hub.publish(payload), main_loop)
 
     vr = process_video(
         video_path=tmp_path,
-        noise_std=noise_std,
         context=current_context,
         noise_mgr=_video_noise_manager,
         on_emit=_emit,
     )
 
-    # Serialise BatchResult objects to plain dicts
-    batches_dicts = []
-    for b in vr.batches:
-        batches_dicts.append({
-            "batch_index":        b.batch_index,
-            "frame_indices":      b.frame_indices,
-            "original":           b.original,
-            "noisy":              b.noisy,
-            "he_smoothed":        b.he_smoothed,
-            "plaintext_smoothed": b.plaintext_smoothed,
-            "mae":                b.mae,
-            "mse":                b.mse,
-            "noise_units_used":   b.noise_units_used,
-            "bootstraps_in_batch": b.bootstraps_in_batch,
-        })
-
-    # Serialise per-frame noise snapshots for the noise chart
     snapshots = [
         {
-            "frame_idx":    s["frame_idx"],
-            "noise":        s["noise"],
-            "threshold":    s["threshold"],
-            "pct_used":     s["pct_used"],
-            "bootstrapped": s["bootstrapped"],
-            "bootstraps":   s["bootstraps"],
+            "frame_idx":       s["frame_idx"],
+            "noise":           s["noise"],
+            "threshold":       s["threshold"],
+            "pct_used":        s["pct_used"],
+            "bootstrapped":    s["bootstrapped"],
+            "bootstraps":      s["bootstraps"],
+            "ops":             s.get("ops") or [],
+            "noise_generated": s.get("noise_generated") or 0,
+            "noise_reduced":   s.get("noise_reduced") or 0,
+            "frame_a":         s.get("frame_a"),
+            "frame_b":         s.get("frame_b"),
         }
         for s in vr.all_noise_snapshots
     ]
 
     return {
-        "status":                  "ok",
+        "status":                 "ok",
         "info": {
             "filename":     vr.info.filename,
             "fps":          vr.info.fps,
@@ -698,19 +763,17 @@ def _run_video_pipeline(tmp_path: str, noise_std: float) -> Dict:
             "width":        vr.info.width,
             "height":       vr.info.height,
         },
-        "total_frames_extracted":    vr.total_frames_extracted,
-        "total_batches":             vr.total_batches,
-        "total_bootstraps":          vr.total_bootstraps,
-        "noise_std":                 vr.noise_std,
-        "all_frame_indices":         vr.all_frame_indices,
-        "all_original":              vr.all_original,
-        "all_noisy":                 vr.all_noisy,
-        "all_he_smoothed":           vr.all_he_smoothed,
-        "all_plaintext_smoothed":    vr.all_plaintext_smoothed,
-        "all_noise_snapshots":       snapshots,
-        "batches":                   batches_dicts,
-        "overall_mae_he_vs_plain":   vr.overall_mae_he_vs_plain,
-        "overall_mse_he_vs_plain":   vr.overall_mse_he_vs_plain,
-        "overall_mae_noisy_vs_orig": vr.overall_mae_noisy_vs_orig,
-        "overall_mse_noisy_vs_orig": vr.overall_mse_noisy_vs_orig,
+        "process_width":          vr.process_width,
+        "process_height":         vr.process_height,
+        "frames_processed":       vr.frames_processed,
+        "truncated":              vr.truncated,
+        "fps":                    vr.fps,
+        "total_bootstraps":       vr.total_bootstraps,
+        "computation":            vr.computation,
+        "original_frames_jpeg":   vr.original_frames_jpeg,
+        "result_frames_jpeg":     vr.result_frames_jpeg,
+        "all_noise_snapshots":    snapshots,
+        "peak_noise":             vr.peak_noise,
+        "total_noise_generated":  vr.total_noise_generated,
+        "total_noise_reduced":    vr.total_noise_reduced,
     }

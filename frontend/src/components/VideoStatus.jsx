@@ -1,12 +1,5 @@
 /**
- * VideoStatus
- * ===========
- * Shows video metadata and per-batch processing stats after a successful
- * POST /video/process call.
- *
- * Props
- * -----
- *  result  – VideoProcessResponse object (null while no video has been processed)
+ * Video Info — stream length and CKKS bootstrap counts.
  */
 
 export default function VideoStatus({ result }) {
@@ -17,16 +10,16 @@ export default function VideoStatus({ result }) {
           <h2>Video Info</h2>
         </div>
         <p className="muted" style={{ padding: "12px 0" }}>
-          No video processed yet. Upload a video to see details here.
+          No stream yet. Upload a video to run HE on every frame.
         </p>
       </div>
     );
   }
 
-  const { info, total_frames_extracted, total_batches, noise_std,
-          total_bootstraps,
-          overall_mae_he_vs_plain, overall_mse_he_vs_plain,
-          overall_mae_noisy_vs_orig, overall_mse_noisy_vs_orig, batches } = result;
+  const {
+    info, frames_processed, fps, process_width, process_height,
+    total_bootstraps, peak_noise, computation,
+  } = result;
 
   return (
     <div className="card">
@@ -35,95 +28,33 @@ export default function VideoStatus({ result }) {
         <span className="muted">{info.filename}</span>
       </div>
 
-      {/* ── Metadata grid ─────────────────────────────────────────── */}
       <div className="videoInfoGrid">
-        <Stat label="FPS"           value={info.fps} />
-        <Stat label="Total frames"  value={info.total_frames} />
-        <Stat label="Duration"      value={`${info.duration_sec.toFixed(2)} s`} />
-        <Stat label="Resolution"    value={`${info.width} × ${info.height}`} />
-        <Stat label="Extracted"     value={`${total_frames_extracted} samples`} />
-        <Stat label="Batches"       value={total_batches} />
-        <Stat label="Noise σ"       value={noise_std === 0 ? "none" : noise_std} />
-        <Stat label="Bootstraps"    value={total_bootstraps ?? 0}
-              hint="Total adaptive bootstrap refreshes during HE processing" accent />
-      </div>
-
-      {/* ── Validation metrics ────────────────────────────────────── */}
-      <div className="cardHeader" style={{ marginTop: 14, marginBottom: 6 }}>
-        <span style={{ fontSize: 13, color: "var(--text-h)", fontWeight: 500 }}>
-          Validation metrics
-        </span>
-      </div>
-      <div className="videoInfoGrid">
+        <Stat label="Source FPS" value={info.fps} />
+        <Stat label="Source frames" value={info.total_frames} />
+        <Stat label="Duration" value={`${info.duration_sec.toFixed(2)} s`} />
+        <Stat label="Source size" value={`${info.width} × ${info.height}`} />
+        <Stat label="Frames streamed" value={frames_processed} accent />
+        <Stat label="HE grid" value={`${process_width} × ${process_height}`} />
+        <Stat label="Playback FPS" value={Number(fps).toFixed(2)} />
         <Stat
-          label="MAE — HE vs plaintext"
-          value={overall_mae_he_vs_plain.toFixed(6)}
-          hint="HE smoothed vs equivalent plaintext average (CKKS approximation error)"
+          label="Bootstraps"
+          value={total_bootstraps ?? 0}
+          hint="Times CKKS computation noise was reset"
           accent
         />
         <Stat
-          label="MSE — HE vs plaintext"
-          value={overall_mse_he_vs_plain.toFixed(8)}
-          accent
-        />
-        <Stat
-          label="MAE — noisy vs original"
-          value={overall_mae_noisy_vs_orig.toFixed(4)}
-          hint="How much noise was injected before HE processing"
-        />
-        <Stat
-          label="MSE — noisy vs original"
-          value={overall_mse_noisy_vs_orig.toFixed(4)}
+          label="Peak CKKS noise"
+          value={peak_noise}
+          hint="Highest computation-noise counter before a reset"
         />
       </div>
-
-      {/* ── Batch table ───────────────────────────────────────────── */}
-      {batches && batches.length > 0 && (
-        <>
-          <div className="cardHeader" style={{ marginTop: 14, marginBottom: 6 }}>
-            <span style={{ fontSize: 13, color: "var(--text-h)", fontWeight: 500 }}>
-              Batch breakdown
-            </span>
-          </div>
-          <div style={{ overflowX: "auto" }}>
-            <table className="videoTable">
-              <thead>
-                <tr>
-                  <th>Batch</th>
-                  <th>Frames</th>
-                  <th>Range</th>
-                  <th>Bootstraps</th>
-                  <th>MAE (HE vs PT)</th>
-                  <th>MSE (HE vs PT)</th>
-                  <th>Noise Δ</th>
-                </tr>
-              </thead>
-              <tbody>
-                {batches.map((b) => (
-                  <tr key={b.batch_index}>
-                    <td>{b.batch_index + 1}</td>
-                    <td>{b.frame_indices.length}</td>
-                    <td>
-                      {b.frame_indices[0]}–{b.frame_indices[b.frame_indices.length - 1]}
-                    </td>
-                    <td style={{ color: "var(--accent)" }}>
-                      {b.bootstraps_in_batch ?? 0}
-                    </td>
-                    <td>{b.mae.toFixed(6)}</td>
-                    <td>{b.mse.toFixed(8)}</td>
-                    <td>{b.noise_units_used}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </>
-      )}
+      <p className="muted" style={{ fontSize: 12, marginTop: 10 }}>
+        {computation}
+      </p>
     </div>
   );
 }
 
-/** Small labelled stat cell */
 function Stat({ label, value, hint, accent = false }) {
   return (
     <div className="videoStat" title={hint ?? ""}>

@@ -1,39 +1,12 @@
 /**
- * VideoNoiseChart
- * ===============
- * Noise budget chart for video streaming mode.
- *
- * Shows — per video frame — how the simulated CKKS noise counter grows
- * during homomorphic operations and drops back to a safe baseline each
- * time the adaptive bootstrap threshold is crossed.
- *
- * Data sources (two complementary feeds)
- * ----------------------------------------
- * 1. liveData   – real-time array of {frame_idx, noise, threshold, pct_used,
- *                  bootstrapped} pushed frame-by-frame via WebSocket while the
- *                  pipeline is running.  Gives instant visual feedback.
- * 2. result     – the complete VideoProcessResponse after processing finishes.
- *                  Its all_noise_snapshots field replaces liveData so the
- *                  chart shows the full, authoritative record.
- *
- * Visual encoding
- * ---------------
- *  Red line        – noise counter value
- *  Dashed amber    – adaptive threshold (can move up/down between frames)
- *  Orange dot      – bootstrap fired at this frame (noise reset to baseline)
- *  Progress bar    – current noise % of threshold  (green / amber / red)
- *
- * Props
- * -----
- *  result    – VideoProcessResponse | null  (null = show live data only)
- *  liveData  – array of frame snapshots arriving via WS  ([] if none yet)
+ * Video streaming: computations on which frames, CKKS noise generated,
+ * bootstrap / noise reduced, and the noise-vs-frame graph — one panel.
  */
 
 import {
   CartesianGrid,
   Line,
   LineChart,
-  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -41,12 +14,13 @@ import {
   Dot,
 } from "recharts";
 
-const C_NOISE     = "#ef4444";   // red
-const C_THRESHOLD = "#f59e0b";   // amber
-const C_BOOT_DOT  = "#fb923c";   // orange
+const C_NOISE     = "#ef4444";
+const C_THRESHOLD = "#f59e0b";
+const C_BOOT_DOT  = "#fb923c";
+const C_GEN       = "#38bdf8";
+const C_RED       = "#34d399";
 
 export default function VideoNoiseChart({ result, liveData = [] }) {
-  // Prefer the authoritative result snapshots over live WS data once done
   const snapshots =
     result?.all_noise_snapshots?.length
       ? result.all_noise_snapshots
@@ -55,37 +29,66 @@ export default function VideoNoiseChart({ result, liveData = [] }) {
   const hasData    = snapshots.length > 0;
   const lastSnap   = snapshots[snapshots.length - 1];
   const pctUsed    = lastSnap?.pct_used   ?? 0;
-  const threshold  = lastSnap?.threshold  ?? "—";
+  const threshold  = lastSnap?.threshold  ?? result?.all_noise_snapshots?.[0]?.threshold ?? 50;
   const totalBoots = result?.total_bootstraps
     ?? lastSnap?.bootstraps
     ?? 0;
+  const generated = result?.total_noise_generated
+    ?? snapshots.reduce((s, x) => s + (x.noise_generated || 0), 0);
+  const reduced = result?.total_noise_reduced
+    ?? snapshots.reduce((s, x) => s + (x.noise_reduced || 0), 0);
 
-  // Recharts data – thin to ≤ 300 points for performance
   const chartData = thin(snapshots, 300).map((s) => ({
-    frame:       s.frame_idx,
-    noise:       s.noise,
-    threshold:   s.threshold,
-    pct_used:    s.pct_used,
-    bootstrapped: s.bootstrapped,
-    bootstraps:  s.bootstraps,
+    frame:           s.frame_idx,
+    noise:           s.noise,
+    threshold:       s.threshold,
+    pct_used:        s.pct_used,
+    bootstrapped:    s.bootstrapped,
+    bootstraps:      s.bootstraps,
+    noise_generated: s.noise_generated || 0,
+    noise_reduced:   s.noise_reduced || 0,
+    ops:             s.ops || [],
+    frame_a:         s.frame_a,
+    frame_b:         s.frame_b,
   }));
 
-  // Progress bar colour
   const barColor =
     pctUsed > 85 ? "#ef4444" : pctUsed > 60 ? "#f59e0b" : "#34d399";
+
+  const wrt =
+    lastSnap?.frame_b != null
+      ? `frames ${lastSnap.frame_b} and ${lastSnap.frame_a}`
+      : lastSnap
+        ? `frame ${lastSnap.frame_a ?? lastSnap.frame_idx}`
+        : "—";
+
+  const recent = snapshots.slice(-8).reverse();
 
   return (
     <div className="card">
       <div className="cardHeader">
-        <h2>HE Noise Budget</h2>
+        <h2>Frame computations · CKKS noise</h2>
         <span className="muted">
           {hasData
-            ? `${snapshots.length} frames · ${totalBoots} bootstrap${totalBoots !== 1 ? "s" : ""}`
+            ? `${snapshots.length} frames · threshold ${threshold}`
             : "Waiting for video…"}
         </span>
       </div>
 
-      {/* ── Progress bar ─────────────────────────────────────────── */}
+      <p className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
+        {result?.computation
+          ?? "Per frame t: encrypt luma of t; if t>0 add Enc(t-1)+Enc(t) and scale × 0.5. Bootstrap when noise exceeds 50."}
+      </p>
+
+      <div className="videoInfoGrid">
+        <Stat label="Threshold" value={threshold} accent />
+        <Stat label="Noise generated" value={generated} hint="CKKS units added by encrypt / add / scale / stream" />
+        <Stat label="Bootstraps" value={totalBoots} hint="Times the budget was reset" accent />
+        <Stat label="Noise reduced" value={reduced} hint="Units dropped by bootstrap" />
+        <Stat label="Peak noise" value={result?.peak_noise ?? lastSnap?.noise ?? "—"} />
+        <Stat label="Budget used" value={`${Number(pctUsed).toFixed(1)}%`} />
+      </div>
+
       <div className="noiseMetaRow">
         <span className="noiseBadge">
           Threshold&nbsp;<strong>{threshold}</strong>
@@ -97,14 +100,48 @@ export default function VideoNoiseChart({ result, liveData = [] }) {
           />
         </div>
         <span className="noisePct" style={{ color: barColor }}>
-          {pctUsed.toFixed(1)}%
-        </span>
-        <span className="noiseBadge" style={{ marginLeft: 6 }}>
-          🔄&nbsp;{totalBoots}
+          {Number(pctUsed).toFixed(1)}%
         </span>
       </div>
 
-      {/* ── Chart ────────────────────────────────────────────────── */}
+      <div className="videoOpsBox">
+        <div className="videoOpsTitle">
+          Computation now · wrt {wrt}
+          {lastSnap?.bootstrapped ? " · bootstrap this frame" : ""}
+        </div>
+        {!hasData ? (
+          <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+            Process a video to see encrypt / add / scale / bootstrap per frame.
+          </p>
+        ) : (
+          <ul className="videoOpsList">
+            {(lastSnap.ops?.length ? lastSnap.ops : ["encrypt + stream"]).map((op, i) => (
+              <li key={i}>{op}</li>
+            ))}
+          </ul>
+        )}
+        {hasData && (
+          <div className="videoOpsRecent">
+            {recent.map((s) => (
+              <div key={s.frame_idx} className="videoOpsRecentRow">
+                <span className="videoOpsFrame">f{s.frame_idx}</span>
+                <span>
+                  {s.frame_b != null
+                    ? `Enc(${s.frame_b})+Enc(${s.frame_a})×0.5`
+                    : `Enc(${s.frame_a ?? s.frame_idx})`}
+                </span>
+                <span style={{ color: C_GEN }}>+{s.noise_generated || 0}</span>
+                {s.bootstrapped ? (
+                  <span style={{ color: C_RED }}>bootstrap −{s.noise_reduced || 0}</span>
+                ) : (
+                  <span className="muted">no bootstrap</span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div className="chart" style={{ height: 220 }}>
         {!hasData ? (
           <div
@@ -117,7 +154,7 @@ export default function VideoNoiseChart({ result, liveData = [] }) {
           >
             <p className="muted" style={{ fontSize: 13 }}>
               {liveData.length === 0
-                ? "Process a video to see the noise budget chart."
+                ? "Process a video to see the noise graph."
                 : "Processing…"}
             </p>
           </div>
@@ -151,8 +188,6 @@ export default function VideoNoiseChart({ result, liveData = [] }) {
                 }}
               />
               <Tooltip content={<NoiseTooltip />} />
-
-              {/* Dynamic threshold line — drawn per data point as a line */}
               <Line
                 type="stepAfter"
                 dataKey="threshold"
@@ -163,8 +198,6 @@ export default function VideoNoiseChart({ result, liveData = [] }) {
                 dot={false}
                 isAnimationActive={false}
               />
-
-              {/* Noise counter */}
               <Line
                 type="monotone"
                 dataKey="noise"
@@ -180,18 +213,27 @@ export default function VideoNoiseChart({ result, liveData = [] }) {
         )}
       </div>
 
-      {/* ── Legend note ───────────────────────────────────────────── */}
       <p className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-        <strong>This is NOT pixel brightness.</strong> Y-axis = CKKS encryption noise
-        counter — goes up ~23 units per frame from HE operations (encrypt + scalar
-        multiply × 5 + HE addition × 4), resets to 20 when bootstrap fires.{" "}
-        <span style={{ color: C_BOOT_DOT }}>●</span> = bootstrap. Threshold range 200–500.
+        Red = ciphertext noise after the ops on that frame. Dashed amber = threshold 50.
+        Orange dots = bootstrap (noise reduced). Hover a point for generated / reduced
+        and the exact encrypt/add/scale steps.
       </p>
     </div>
   );
 }
 
-// ── Custom dot: orange circle only on bootstrap frames ────────────────────
+function Stat({ label, value, hint }) {
+  const accent = hint?.includes("reset") || label === "Threshold" || label === "Bootstraps";
+  return (
+    <div className="videoStat" title={hint ?? ""}>
+      <span className="videoStatLabel">{label}</span>
+      <span className={`videoStatValue${accent ? " videoStatValue--accent" : ""}`}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
 function BootstrapDot(props) {
   const { cx, cy, payload } = props;
   if (!payload?.bootstrapped) return null;
@@ -207,7 +249,6 @@ function BootstrapDot(props) {
   );
 }
 
-// ── Custom tooltip ────────────────────────────────────────────────────────
 function NoiseTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null;
   const d = payload[0]?.payload ?? {};
@@ -216,32 +257,41 @@ function NoiseTooltip({ active, payload, label }) {
       <span className="tooltipLabel">
         Frame <span className="tooltipValue">{label}</span>
       </span>
+      {d.frame_b != null ? (
+        <span>
+          wrt Enc({d.frame_b}) + Enc({d.frame_a}) × 0.5
+        </span>
+      ) : (
+        <span>wrt Enc({d.frame_a ?? label})</span>
+      )}
+      {(d.ops || []).map((op, i) => (
+        <span key={i} className="tooltipMono">{op}</span>
+      ))}
       <span>
         <span className="tooltipLabel">Noise </span>
-        <span className="tooltipValue" style={{ color: C_NOISE }}>
-          {d.noise}
-        </span>
+        <span className="tooltipValue" style={{ color: C_NOISE }}>{d.noise}</span>
+      </span>
+      <span>
+        <span className="tooltipLabel">Generated </span>
+        <span className="tooltipValue" style={{ color: C_GEN }}>+{d.noise_generated}</span>
+      </span>
+      <span>
+        <span className="tooltipLabel">Reduced </span>
+        <span className="tooltipValue" style={{ color: C_RED }}>−{d.noise_reduced}</span>
       </span>
       <span>
         <span className="tooltipLabel">Threshold </span>
-        <span className="tooltipValue" style={{ color: C_THRESHOLD }}>
-          {d.threshold}
-        </span>
-      </span>
-      <span>
-        <span className="tooltipLabel">Used </span>
-        <span className="tooltipValue">{d.pct_used?.toFixed(1)}%</span>
+        <span className="tooltipValue" style={{ color: C_THRESHOLD }}>{d.threshold}</span>
       </span>
       {d.bootstrapped && (
         <span className="tooltipBoot">
-          🔄 Bootstrap #{d.bootstraps} — noise reset
+          Bootstrap #{d.bootstraps} — noise reduced
         </span>
       )}
     </div>
   );
 }
 
-// ── Utility: thin array to maxPts by even sampling ────────────────────────
 function thin(arr, maxPts) {
   if (arr.length <= maxPts) return arr;
   const step = arr.length / maxPts;

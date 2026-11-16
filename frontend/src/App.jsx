@@ -130,12 +130,17 @@ export default function App() {
             setVideoLiveNoise((prev) => [
               ...prev.slice(-(MAX_VID_LIVE - 1)),
               {
-                frame_idx:    msg.frame_idx,
-                noise:        msg.noise,
-                threshold:    msg.threshold,
-                pct_used:     msg.pct_used,
-                bootstrapped: msg.bootstrapped,
-                bootstraps:   msg.bootstraps,
+                frame_idx:       msg.frame_idx,
+                noise:           msg.noise,
+                threshold:       msg.threshold,
+                pct_used:        msg.pct_used,
+                bootstrapped:    msg.bootstrapped,
+                bootstraps:      msg.bootstraps,
+                ops:             msg.ops || [],
+                noise_generated: msg.noise_generated || 0,
+                noise_reduced:   msg.noise_reduced || 0,
+                frame_a:         msg.frame_a,
+                frame_b:         msg.frame_b,
               },
             ]);
             break;
@@ -152,10 +157,8 @@ export default function App() {
           case "video_stream":
             pushLog(
               "api",
-              `Video batch ${msg.batch_index + 1} complete — ` +
-              `${msg.frame_count} frames | ` +
-              `${msg.bootstraps_in_batch} bootstrap(s) | ` +
-              `noise Δ ${msg.noise_units_used}`,
+              `Video denoise complete — ${msg.frame_count} frames | ` +
+              `${msg.bootstraps_in_batch} bootstrap(s)`,
             );
             break;
 

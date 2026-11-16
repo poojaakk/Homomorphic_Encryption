@@ -34,8 +34,10 @@ export default function Upload({ onNewLog }) {
         onNewLog({ time: new Date().toISOString(), category: "api", message: msg });
       }
     } catch (err) {
+      const detail = err?.response?.data?.detail;
       const msg =
-        err?.response?.data?.detail ??
+        (typeof detail === "string" && detail) ||
+        detail?.msg ||
         "Upload failed. Check that the backend is running and the column name is correct.";
       setStatus(msg);
       setIsError(true);
@@ -64,7 +66,7 @@ export default function Upload({ onNewLog }) {
         />
         <input
           type="text"
-          placeholder='Column name (e.g. "temperature")'
+          placeholder='Column name (e.g. PULSE, HR, SpO2)'
           value={column}
           onChange={(e) => setColumn(e.target.value)}
           className="input"

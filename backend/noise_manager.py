@@ -15,13 +15,8 @@ Two operating modes
   "csv"   : low-volume static dataset.  A single CSV row costs 3 noise units
             (1 encrypt + 2 stream). Threshold range 50–80 is appropriate.
 
-  "video" : high-volume streaming.  One video frame costs ~27 noise units
-            (1 encrypt + 5 scale_plaintext×2 + 4 aggregate_step×3 = 1+10+12=23,
-            plus 2 stream = 25, rounded up for safety to 27).
-            A 60-frame batch costs ~1350 units.  Bootstrap threshold must be
-            set well inside that range so refreshes fire during the batch,
-            not after it has already accumulated thousands of units.
-            Realistic range: 200–500 units per bootstrap cycle.
+  "video" : per-frame CKKS ops (encrypt + optional add/scale + stream).
+            Bootstrap threshold is pinned at 50.
 """
 
 from __future__ import annotations
@@ -50,12 +45,10 @@ _CSV_BASE_THRESHOLD  = 50
 _CSV_MIN_THRESHOLD   = 20
 _CSV_MAX_THRESHOLD   = 80
 #
-#  Video mode – many operations per frame, threshold in [200, 500]
-#  Bootstrap fires every ~200–500 noise units so that within a 60-frame
-#  batch (~1350 units) we get 3–6 bootstrap refreshes instead of zero.
-_VIDEO_BASE_THRESHOLD = 250
-_VIDEO_MIN_THRESHOLD  = 200
-_VIDEO_MAX_THRESHOLD  = 500
+#  Video mode – bootstrap when CKKS noise exceeds 50.
+_VIDEO_BASE_THRESHOLD = 50
+_VIDEO_MIN_THRESHOLD  = 50
+_VIDEO_MAX_THRESHOLD  = 50
 
 # Shared adaptive knobs
 _RATE_WINDOW_SEC = 10.0   # seconds over which growth rate is calculated
