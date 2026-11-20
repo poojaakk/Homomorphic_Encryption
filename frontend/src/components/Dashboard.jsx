@@ -10,17 +10,27 @@
  * Video mode panels:
  *  Header → VideoUpload → playback → computations + noise/bootstrap + graph → Logs
  *
+ * Frames mode panels (new):
+ *  Header → FrameAnalysis (upload + progress + info)
+ *         → FrameGraphs   (4 charts)
+ *         → FrameViewer   (prev/next/jump + per-frame stats)
+ *         → Logs
+ *
  * The mode selector bar sits between the header and the content panels.
- * Logs are shared across both modes.
+ * Logs are shared across all modes.
  */
 
 import Controls        from "./Controls";
+import FrameAnalysis   from "./FrameAnalysis";
+import FrameGraphs     from "./FrameGraphs";
+import FrameViewer     from "./FrameViewer";
 import Logs            from "./Logs";
 import NoiseChart      from "./NoiseChart";
 import StreamingChart  from "./StreamingChart";
 import Upload          from "./Upload";
 import VideoCompare    from "./VideoCompare";
 import VideoNoiseChart from "./VideoNoiseChart";
+import VideoStatus     from "./VideoStatus";
 import VideoUpload     from "./VideoUpload";
 
 export default function Dashboard({
@@ -30,10 +40,15 @@ export default function Dashboard({
   stream, noise, kafkaAcks,
   // video
   videoResult, onVideoResult, videoLiveNoise = [],
+  // frame analysis
+  frameAnalysisResult, onFrameAnalysisResult,
+  frameLiveProgress, frameAnalyzing, selectedFrame, onSelectFrame,
 }) {
   const latestNoise = noise[noise.length - 1];
   const pctUsed     = latestNoise?.pct_used  ?? 0;
   const noiseRate   = latestNoise?.noise_rate ?? 0;
+
+  const frameStats = frameAnalysisResult?.stats ?? [];
 
   return (
     <div className="app">
@@ -74,7 +89,7 @@ export default function Dashboard({
 
       {/* ── Mode selector ────────────────────────────────────────────── */}
       <div className="modeBar">
-        <span className="modeLabel">Data source:</span>
+        <span className="modeLabel">Mode:</span>
         <button
           className={`modeBtn${mode === "csv" ? " modeBtn--active" : ""}`}
           onClick={() => onModeChange("csv")}
@@ -110,13 +125,16 @@ export default function Dashboard({
       )}
 
       {/* ═══════════════════════════════════════════════════════════════
-          VIDEO STREAMING MODE  — new panels
+          VIDEO STREAMING MODE  — HE pipeline, completely unchanged
       ═══════════════════════════════════════════════════════════════ */}
       {mode === "video" && (
         <>
-          {/* Upload */}
           <section className="section">
             <VideoUpload onResult={onVideoResult} onNewLog={onNewLog} />
+          </section>
+
+          <section className="section">
+            <VideoStatus result={videoResult} />
           </section>
 
           <section className="section">
@@ -129,7 +147,42 @@ export default function Dashboard({
         </>
       )}
 
-      {/* ── Logs — shared across both modes ──────────────────────────── */}
+      {/* ═══════════════════════════════════════════════════════════════
+          FRAME ANALYSIS MODE  — pure OpenCV stats, no HE
+      ═══════════════════════════════════════════════════════════════ */}
+      {mode === "frames" && (
+        <>
+          {/* 1. Upload + progress + video info */}
+          <section className="section">
+            <FrameAnalysis
+              onResult={onFrameAnalysisResult}
+              onNewLog={onNewLog}
+              liveProgress={frameLiveProgress}
+              analyzing={frameAnalyzing}
+            />
+          </section>
+
+          {/* 2. Four interactive graphs */}
+          <section className="section">
+            <FrameGraphs
+              stats={frameStats}
+              selectedFrame={selectedFrame}
+              onSelectFrame={onSelectFrame}
+            />
+          </section>
+
+          {/* 3. Frame-by-frame viewer + stats table */}
+          <section className="section">
+            <FrameViewer
+              stats={frameStats}
+              selectedFrame={selectedFrame}
+              onSelectFrame={onSelectFrame}
+            />
+          </section>
+        </>
+      )}
+
+      {/* ── Logs — shared across all modes ───────────────────────────── */}
       <section className="section">
         <Logs entries={logs} />
       </section>

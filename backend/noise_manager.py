@@ -5,15 +5,14 @@ Tracks ciphertext noise budget across homomorphic operations and adapts
 the bootstrap threshold dynamically based on the observed noise growth rate.
 
 Noise model (simulated, not from TenSEAL internals):
-  - Each HE operation adds a configurable delta to the budget counter.
+  - Each HE operation adds a random delta drawn from a per-op range.
   - The adaptive threshold shrinks when the rate of noise growth is high,
     triggering bootstrapping sooner to keep the budget safe.
   - History is kept in a bounded ring-buffer so the UI can chart it.
 
 Two operating modes
 -------------------
-  "csv"   : low-volume static dataset.  A single CSV row costs 3 noise units
-            (1 encrypt + 2 stream). Threshold range 50–80 is appropriate.
+  "csv"   : low-volume static dataset. Threshold range 50–80 is appropriate.
 
   "video" : per-frame CKKS ops (encrypt + optional add/scale + stream).
             Bootstrap threshold is pinned at 50.
@@ -21,22 +20,26 @@ Two operating modes
 
 from __future__ import annotations
 
+import random
 import time
 from collections import deque
-from typing import Deque, Dict, List, Literal, Optional
+from typing import Deque, Dict, List, Literal, Optional, Tuple
 
 # How many historical data-points we keep for rate calculation and UI charting.
-_HISTORY_CAPACITY = 500   # raised from 200 so video history fits
+_HISTORY_CAPACITY = 2000  # enough for a full 2000-frame video run
 
-# Noise deltas per operation type (CKKS approximate values).
-NOISE_DELTAS: Dict[str, int] = {
-    "encrypt":        1,
-    "add":            2,
-    "multiply":       12,
-    "stream":         2,
-    "aggregate_step": 3,
-    "scale":          2,   # plaintext scalar multiply (same cost as add)
+# Inclusive random ranges per operation. These are simulated budget units,
+# not a real CKKS noise formula — previously they were fixed constants, which
+# made every video frame grow by exactly +7 (encrypt 1 + stream 2 + add 2 + scale/add 2).
+NOISE_RANGES: Dict[str, Tuple[int, int]] = {
+    "encrypt":        (1, 4),
+    "add":            (1, 5),
+    "multiply":       (8, 16),
+    "stream":         (1, 4),
+    "aggregate_step": (2, 6),
+    "scale":          (1, 5),
 }
+_DEFAULT_RANGE: Tuple[int, int] = (1, 4)
 
 # ── Adaptive parameters per mode ──────────────────────────────────────────
 #
@@ -75,12 +78,12 @@ class NoiseManager:
     history     : bounded list of ``{t, noise, threshold, bootstraps}`` snapshots
     """
 
-    def __init__(self, mode: Literal["csv", "video"] = "csv") -> None:
+    def __init__(self, mode: Literal["csv", "video"] = "csv", custom_threshold: Optional[int] = None) -> None:
         self.mode      = mode
         self.noise: int = 0
         self.bootstraps: int = 0
 
-        # Set initial threshold from mode
+        # Set initial threshold from mode, then override if caller supplied one
         if mode == "video":
             self.threshold: int = _VIDEO_BASE_THRESHOLD
             self._min_threshold  = _VIDEO_MIN_THRESHOLD
@@ -89,6 +92,14 @@ class NoiseManager:
             self.threshold = _CSV_BASE_THRESHOLD
             self._min_threshold = _CSV_MIN_THRESHOLD
             self._max_threshold = _CSV_MAX_THRESHOLD
+
+        # Pin to user-supplied threshold — both min and max locked to same value
+        # so the adaptive logic cannot drift away from the user's choice.
+        if custom_threshold is not None:
+            t = max(1, int(custom_threshold))
+            self.threshold      = t
+            self._min_threshold = t
+            self._max_threshold = t
 
         # Ring-buffer of (timestamp_float, noise_int) for rate calculation.
         self._rate_buf: Deque[tuple[float, int]] = deque(maxlen=100)
@@ -106,7 +117,8 @@ class NoiseManager:
         Increase noise by the delta for *operation*.
         Returns the delta that was applied.
         """
-        delta = NOISE_DELTAS.get(operation, 2)
+        lo, hi = NOISE_RANGES.get(operation, _DEFAULT_RANGE)
+        delta = random.randint(lo, hi)
         self.noise += delta
         now = time.monotonic()
         self._rate_buf.append((now, self.noise))

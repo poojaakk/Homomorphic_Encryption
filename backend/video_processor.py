@@ -1,5 +1,5 @@
 """
-Video Processor  –  streaming HE computations + CKKS noise
+Video Processor streaming HE computations + CKKS noise
 ==========================================================
 
 Noise here is ciphertext noise created by HE operations as frames stream
@@ -9,7 +9,7 @@ reduced by bootstrapping when the adaptive threshold is crossed.
 No Gaussian (or any other) noise is added to the video.  Pixel grain is
 not the thing being reduced.
 
-Per frame t (all frames in the file):
+Per sampled frame t (up to MAX_FRAMES from the full video):
   Enc(x[t])
   if t > 0:  y[t] = 0.5 · (Enc(x[t-1]) + Enc(x[t]))   # CSV add + scale
   else:      y[t] = Enc(x[t])
@@ -17,6 +17,14 @@ Per frame t (all frames in the file):
   decrypt y[t] for playback
 
 The graph that matters is CKKS noise vs frame (sawtooth = bootstrap).
+
+Large-video support
+-------------------
+  MAX_FRAMES = 2000  — if the video has more frames, we sample them
+  uniformly so processing always works through exactly this many frames.
+  VideoProcessResult.truncated is True when sampling occurred.
+  Frames are streamed one at a time from disk (no full in-memory list)
+  to keep RAM use proportional to GRID size, not to source resolution.
 """
 
 from __future__ import annotations
@@ -25,7 +33,7 @@ import base64
 import os
 import tempfile
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, Generator, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -38,6 +46,7 @@ from noise_manager import NoiseManager
 GRID = 32
 DISPLAY_SIZE = 192
 JPEG_QUALITY = 55
+MAX_FRAMES = 2000          # hard cap — sample uniformly above this
 SUPPORTED_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
 
 EmitCallback = Callable[[Dict], None]
@@ -97,24 +106,50 @@ def get_video_info(path: str) -> VideoInfo:
         cap.release()
 
 
-def _read_all_frames(path: str) -> Tuple[VideoInfo, List[np.ndarray]]:
-    _validate_path(path)
+def _sample_indices(total: int, max_frames: int) -> List[int]:
+    """
+    Return a sorted list of frame indices to process.
+    If total <= max_frames, every frame is included.
+    Otherwise, spread max_frames indices uniformly across [0, total).
+    """
+    if total <= max_frames:
+        return list(range(total))
+    # Uniform spacing — include the first and last frame
+    step = (total - 1) / (max_frames - 1)
+    return sorted(set(round(i * step) for i in range(max_frames)))
+
+
+def _stream_sampled_frames(
+    path: str, indices: List[int]
+) -> Generator[Tuple[int, np.ndarray], None, None]:
+    """
+    Yield (original_frame_index, bgr_frame) for each index in *indices*.
+    Frames are read one at a time; only the current frame is held in RAM.
+    Uses cv2.CAP_PROP_POS_FRAMES to seek efficiently.
+    """
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError(f"Cannot open video: {path}")
-    info = get_video_info(path)
-    frames: List[np.ndarray] = []
     try:
-        while True:
+        idx_set = set(indices)
+        idx_iter = iter(sorted(indices))
+        next_target = next(idx_iter, None)
+        current_pos = 0
+
+        while next_target is not None:
+            # Seek if we need to jump forward more than 1 frame
+            if next_target != current_pos:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, next_target)
+                current_pos = next_target
+
             ok, frame = cap.read()
             if not ok:
                 break
-            frames.append(frame)
+            yield next_target, frame
+            current_pos = next_target + 1
+            next_target = next(idx_iter, None)
     finally:
         cap.release()
-    if not frames:
-        raise ValueError("Video produced zero readable frames.")
-    return info, frames
 
 
 def _luma_vec(frame: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -177,15 +212,35 @@ def process_video(
     context=None,
     noise_mgr: Optional[NoiseManager] = None,
     on_emit: Optional[EmitCallback] = None,
+    max_frames: int = MAX_FRAMES,
+    threshold: Optional[int] = None,
 ) -> VideoProcessResult:
     del noise_std, batch_size
     if context is None:
         from encryption import create_context
         context = create_context()
     if noise_mgr is None:
-        noise_mgr = NoiseManager(mode="video")
+        noise_mgr = NoiseManager(mode="video", custom_threshold=threshold)
 
-    info, raw_frames = _read_all_frames(video_path)
+    info = get_video_info(video_path)
+    total_source_frames = info.total_frames
+
+    # Determine which frames to process (uniform sample if above cap)
+    indices = _sample_indices(total_source_frames, max_frames)
+    truncated = len(indices) < total_source_frames
+
+    actual_threshold = noise_mgr.get_threshold()
+
+    # Update computation description to reflect sampling and threshold
+    sample_note = (
+        f" Sampled {len(indices)} of {total_source_frames} source frames uniformly."
+        if truncated else ""
+    )
+    computation = (
+        "Per frame t: encrypt luma of frame t; if t>0 add Enc(t-1)+Enc(t) and scale by 0.5. "
+        f"Threshold {actual_threshold}: bootstrap resets CKKS noise.{sample_note}"
+    )
+
     snapshots: List[Dict] = []
     orig_jpegs: List[str] = []
     result_jpegs: List[str] = []
@@ -194,29 +249,34 @@ def process_video(
     total_generated = 0
     total_reduced = 0
 
-    for idx, frame in enumerate(raw_frames):
+    # Stream frames one at a time — no full-resolution list in RAM
+    for seq_idx, (src_frame_idx, frame) in enumerate(
+        _stream_sampled_frames(video_path, indices)
+    ):
         y_vec, cr, cb = _luma_vec(frame)
-        orig_jpegs.append(_jpeg_b64(cv2.resize(frame, (GRID, GRID), interpolation=cv2.INTER_AREA)))
+        orig_jpegs.append(
+            _jpeg_b64(cv2.resize(frame, (GRID, GRID), interpolation=cv2.INTER_AREA))
+        )
 
         noise_before = noise_mgr.get_noise()
         ops: List[str] = []
-        frame_a: Optional[int] = idx
+        frame_a: Optional[int] = seq_idx          # sequential index (0-based in processed set)
         frame_b: Optional[int] = None
 
         enc = encrypt_data(context, y_vec.tolist())
         noise_mgr.increase_noise("encrypt")
         noise_mgr.increase_noise("stream")
-        ops.append(f"encrypt luma of frame {idx}")
+        ops.append(f"encrypt luma of frame {seq_idx} (source #{src_frame_idx})")
 
         try:
             if prev_enc is None:
                 out_enc = enc
                 ops.append("no add (first frame / after bootstrap)")
             else:
-                frame_b = idx - 1
+                frame_b = seq_idx - 1
                 summed, _ = add(enc, prev_enc, noise_mgr)
                 out_enc, _ = scale_plaintext(summed, 0.5, noise_mgr)
-                ops.append(f"add Enc(frame {idx}) + Enc(frame {idx - 1})")
+                ops.append(f"add Enc(frame {seq_idx}) + Enc(frame {seq_idx - 1})")
                 ops.append("scale result × 0.5")
             raw = np.array(decrypt_data(out_enc), dtype=np.float64)
         except ComputeError:
@@ -242,7 +302,7 @@ def process_video(
 
         peak = max(peak, noise_before + max(0, generated))
         snap = _snapshot(
-            idx,
+            seq_idx,
             noise_mgr,
             bootstrapped,
             ops=ops,
@@ -259,7 +319,7 @@ def process_video(
                 if bootstrapped:
                     on_emit({
                         "type": "video_bootstrap",
-                        "frame_idx": idx,
+                        "frame_idx": seq_idx,
                         "bootstraps": noise_mgr.bootstraps,
                         "threshold": noise_mgr.get_threshold(),
                         "before": boot_before,
@@ -268,12 +328,14 @@ def process_video(
             except Exception:
                 pass
 
+    frames_processed = len(snapshots)
+
     if on_emit:
         try:
             on_emit({
                 "type": "video_stream",
                 "batch_index": 0,
-                "frame_count": len(raw_frames),
+                "frame_count": frames_processed,
                 "bootstraps_in_batch": noise_mgr.bootstraps,
                 "noise_units_used": peak,
             })
@@ -282,11 +344,11 @@ def process_video(
 
     return VideoProcessResult(
         info=info,
-        frames_processed=len(raw_frames),
+        frames_processed=frames_processed,
         process_width=GRID,
         process_height=GRID,
         fps=info.fps or 25.0,
-        truncated=False,
+        truncated=truncated,
         total_bootstraps=noise_mgr.bootstraps,
         original_frames_jpeg=orig_jpegs,
         result_frames_jpeg=result_jpegs,
@@ -294,6 +356,7 @@ def process_video(
         peak_noise=peak,
         total_noise_generated=total_generated,
         total_noise_reduced=total_reduced,
+        computation=computation,
     )
 
 

@@ -35,6 +35,7 @@ import asyncio
 import io
 import os
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -67,6 +68,10 @@ from models import (
     ContextResponse,
     DecryptResponse,
     EncryptResponse,
+    FrameAnalysisResponse,
+    FrameAnalysisStatusResponse,
+    FrameHistogramResponse,
+    FramePageResponse,
     LogsResponse,
     NoiseResponse,
     StatusResponse,
@@ -76,6 +81,12 @@ from models import (
 )
 from noise_manager import NoiseManager
 from video_processor import process_video, save_upload_to_temp
+from frame_analyzer import (
+    analyze_video,
+    get_frame_jpeg,
+    pixel_histogram,
+    FrameAnalysisResult,
+)
 from ws_hub import WebSocketHub
 
 # CSV/static HE + Kafka stream (do not share this pool with the video pipeline)
@@ -108,6 +119,16 @@ _video_last_error: Optional[str] = None
 # Dedicated video-mode noise manager (mode="video", threshold 200-500).
 # Kept separate so CSV and video noise budgets don't interfere with each other.
 _video_noise_manager = NoiseManager(mode="video")
+
+# ---------------------------------------------------------------------------
+# Frame analysis state  (independent pipeline — no HE, pure OpenCV stats)
+# ---------------------------------------------------------------------------
+_fa_analyzing: bool = False
+_fa_frames_done: int = 0
+_fa_total_frames: int = 0
+_fa_last_result: Optional[FrameAnalysisResult] = None
+_fa_last_error: Optional[str] = None
+_fa_tmp_path: Optional[str] = None      # kept alive so JPEG/histogram endpoints can re-open it
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +203,7 @@ async def _producer_loop() -> None:
         message_key = uuid.uuid4().hex
         kafka_ok = True
         prod = producer
+        t_sample = time.perf_counter()
         try:
             enc, kafka_ok = await loop.run_in_executor(
                 _csv_stream_ex, _csv_stream_one, sample, prod, message_key
@@ -207,6 +229,7 @@ async def _producer_loop() -> None:
             bootstrap_info = _bootstrap_and_notify(label="auto")
 
         nm = noise_manager.summary()
+        sample_ms = (time.perf_counter() - t_sample) * 1000
         await hub.publish(
             {
                 "type": "stream",
@@ -221,6 +244,7 @@ async def _producer_loop() -> None:
                 "refreshed": bootstrap_info is not None,
                 "refresh_before": bootstrap_info["before"] if bootstrap_info else None,
                 "refresh_after": bootstrap_info["after"] if bootstrap_info else None,
+                "sample_ms": round(sample_ms, 2),
             }
         )
         await asyncio.sleep(0)
@@ -318,6 +342,9 @@ async def _kafka_connect_loop() -> None:
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
+
+# 500 MB multipart body limit — needed for large video uploads
+_MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 
 app = FastAPI(
     title="Noise-Resilient HE Streaming API",
@@ -645,10 +672,11 @@ def video_status():
 @app.post("/video/process", response_model=VideoProcessResponse)
 async def video_process(
     file: UploadFile = File(...),
+    threshold: int = Form(50, ge=10, le=500, description="Bootstrap threshold (10–500)"),
 ):
     """
     Stream every frame through CKKS encrypt → add last two → scale 0.5.
-    Ciphertext noise from those ops is bootstrapped.  No extra pixel noise.
+    Ciphertext noise from those ops is bootstrapped when it exceeds *threshold*.
     """
     global _video_processing, _video_last_result, _video_last_error, _video_noise_manager
 
@@ -670,8 +698,9 @@ async def video_process(
     _video_last_error = None
     _video_last_result = None
 
-    # Fresh noise manager for each video so budgets don't accumulate across runs
-    _video_noise_manager = NoiseManager(mode="video")
+    # Fresh noise manager pinned to the user-supplied threshold
+    _video_noise_manager = NoiseManager(mode="video", custom_threshold=threshold)
+    log(f"Video pipeline starting: threshold={threshold}", "api")
 
     tmp_path: Optional[str] = None
 
@@ -679,6 +708,11 @@ async def video_process(
         content = await file.read()
         if len(content) == 0:
             raise ValueError("Uploaded file is empty")
+        if len(content) > _MAX_UPLOAD_BYTES:
+            raise ValueError(
+                f"File too large ({len(content) // (1024*1024)} MB). "
+                f"Maximum allowed: {_MAX_UPLOAD_BYTES // (1024*1024)} MB."
+            )
 
         loop = asyncio.get_running_loop()
         tmp_path = await loop.run_in_executor(
@@ -692,6 +726,7 @@ async def video_process(
             None,
             _run_video_pipeline,
             tmp_path,
+            threshold,
         )
 
         _video_last_result = result
@@ -723,7 +758,7 @@ async def video_process(
                 pass
 
 
-def _run_video_pipeline(tmp_path: str) -> Dict:
+def _run_video_pipeline(tmp_path: str, threshold: int = 50) -> Dict:
     """Synchronous wrapper — runs in a thread executor."""
     def _emit(payload: dict) -> None:
         if main_loop and main_loop.is_running():
@@ -734,6 +769,7 @@ def _run_video_pipeline(tmp_path: str) -> Dict:
         context=current_context,
         noise_mgr=_video_noise_manager,
         on_emit=_emit,
+        threshold=threshold,
     )
 
     snapshots = [
@@ -749,6 +785,9 @@ def _run_video_pipeline(tmp_path: str) -> Dict:
             "noise_reduced":   s.get("noise_reduced") or 0,
             "frame_a":         s.get("frame_a"),
             "frame_b":         s.get("frame_b"),
+            "frame_ms":        s.get("frame_ms") or 0,
+            "elapsed_ms":      s.get("elapsed_ms") or 0,
+            "he_ops":          s.get("he_ops") or 0,
         }
         for s in vr.all_noise_snapshots
     ]
@@ -776,4 +815,245 @@ def _run_video_pipeline(tmp_path: str) -> Dict:
         "peak_noise":             vr.peak_noise,
         "total_noise_generated":  vr.total_noise_generated,
         "total_noise_reduced":    vr.total_noise_reduced,
+        "elapsed_ms":             vr.elapsed_ms,
+        "avg_frame_ms":           vr.avg_frame_ms,
+        "throughput_fps":         vr.throughput_fps,
     }
+
+
+# ===========================================================================
+# Frame Analysis endpoints  (pure OpenCV — independent of the HE pipeline)
+# ===========================================================================
+
+def _run_frame_analysis(tmp_path: str) -> None:
+    """
+    Synchronous worker — runs in a thread executor.
+    Updates global state and publishes WebSocket progress events.
+    """
+    global _fa_analyzing, _fa_frames_done, _fa_total_frames
+    global _fa_last_result, _fa_last_error
+
+    def _on_progress(done: int, total: int) -> None:
+        global _fa_frames_done, _fa_total_frames
+        _fa_frames_done  = done
+        _fa_total_frames = total
+        if main_loop and main_loop.is_running():
+            pct = round(done / total * 100, 1) if total > 0 else 0.0
+            asyncio.run_coroutine_threadsafe(
+                hub.publish({
+                    "type":         "frame_extraction_progress",
+                    "frames_done":  done,
+                    "total_frames": total,
+                    "pct_done":     pct,
+                }),
+                main_loop,
+            )
+
+    try:
+        result = analyze_video(tmp_path, on_progress=_on_progress)
+        _fa_last_result = result
+        log(
+            f"Frame analysis complete: {result.filename} | "
+            f"{result.frames_analyzed} frames extracted",
+            "api",
+        )
+        if main_loop and main_loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                hub.publish({
+                    "type":            "frame_extraction_done",
+                    "frames_analyzed": result.frames_analyzed,
+                    "total_frames":    result.total_frames,
+                    "filename":        result.filename,
+                }),
+                main_loop,
+            )
+    except Exception as exc:
+        _fa_last_error = str(exc)
+        log(f"Frame analysis error: {exc}", "error")
+        if main_loop and main_loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                hub.publish({"type": "frame_extraction_error", "message": str(exc)}),
+                main_loop,
+            )
+    finally:
+        _fa_analyzing = False
+
+
+@app.post("/frames/analyze", response_model=FrameAnalysisResponse)
+async def frames_analyze(file: UploadFile = File(...)):
+    """
+    Upload a video → extract every frame → compute grayscale stats.
+    Returns the complete stats list synchronously (runs in a thread so the
+    event-loop stays responsive for WS heartbeats during processing).
+    """
+    global _fa_analyzing, _fa_frames_done, _fa_total_frames
+    global _fa_last_result, _fa_last_error, _fa_tmp_path
+
+    if _fa_analyzing:
+        raise HTTPException(status_code=409, detail="Frame analysis already in progress.")
+
+    filename = file.filename or "upload.mp4"
+    ext = os.path.splitext(filename)[1].lower()
+    supported = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
+    if ext not in supported:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported format '{ext}'. Supported: {', '.join(sorted(supported))}",
+        )
+
+    content = await file.read()
+    if len(content) == 0:
+        raise HTTPException(status_code=422, detail="Uploaded file is empty.")
+    if len(content) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"File too large ({len(content) // (1024*1024)} MB). "
+                f"Maximum: {_MAX_UPLOAD_BYTES // (1024*1024)} MB."
+            ),
+        )
+
+    # Clean up previous temp file if any
+    if _fa_tmp_path and os.path.exists(_fa_tmp_path):
+        try:
+            os.remove(_fa_tmp_path)
+        except OSError:
+            pass
+
+    _fa_analyzing    = True
+    _fa_frames_done  = 0
+    _fa_total_frames = 0
+    _fa_last_result  = None
+    _fa_last_error   = None
+
+    loop = asyncio.get_running_loop()
+    tmp_path = await loop.run_in_executor(None, save_upload_to_temp, content, filename)
+    _fa_tmp_path = tmp_path
+
+    log(f"Frame analysis upload saved: {filename} ({len(content)//1024} KB)", "api")
+
+    # Run the CPU-bound analysis in a thread executor
+    await loop.run_in_executor(None, _run_frame_analysis, tmp_path)
+
+    if _fa_last_error:
+        raise HTTPException(status_code=500, detail=_fa_last_error)
+
+    r = _fa_last_result
+    return FrameAnalysisResponse(
+        status="ok",
+        info={
+            "filename":        r.filename,
+            "fps":             r.fps,
+            "total_frames":    r.total_frames,
+            "duration_sec":    r.duration_sec,
+            "width":           r.width,
+            "height":          r.height,
+            "frames_analyzed": r.frames_analyzed,
+        },
+        stats=[
+            {
+                "frame_idx":     s.frame_idx,
+                "timestamp_s":   s.timestamp_s,
+                "width":         s.width,
+                "height":        s.height,
+                "avg_intensity": s.avg_intensity,
+                "min_intensity": s.min_intensity,
+                "max_intensity": s.max_intensity,
+                "std_intensity": s.std_intensity,
+                "frame_size_kb": s.frame_size_kb,
+            }
+            for s in r.stats
+        ],
+    )
+
+
+@app.get("/frames/analyze/status", response_model=FrameAnalysisStatusResponse)
+def frames_analyze_status():
+    """Live progress: poll this during processing."""
+    pct = (
+        round(_fa_frames_done / _fa_total_frames * 100, 1)
+        if _fa_total_frames > 0 else 0.0
+    )
+    return FrameAnalysisStatusResponse(
+        analyzing    = _fa_analyzing,
+        frames_done  = _fa_frames_done,
+        total_frames = _fa_total_frames,
+        pct_done     = pct,
+        filename     = _fa_last_result.filename if _fa_last_result else None,
+        error        = _fa_last_error,
+    )
+
+
+@app.get("/frames/page", response_model=FramePageResponse)
+def frames_page(
+    frame_idx: int = Query(0, ge=0, description="Zero-based frame index"),
+    width:     int = Query(320, ge=64, le=1920),
+    height:    int = Query(180, ge=36, le=1080),
+):
+    """
+    Return the JPEG thumbnail + stat for a single frame.
+    The original video temp file is re-opened for each request so only one
+    frame is decoded at a time.
+    """
+    if _fa_last_result is None:
+        raise HTTPException(status_code=404, detail="No frame analysis result available.")
+    if not _fa_tmp_path or not os.path.exists(_fa_tmp_path):
+        raise HTTPException(
+            status_code=404,
+            detail="Source video has been cleaned up. Re-upload to view frames.",
+        )
+
+    r = _fa_last_result
+    if frame_idx >= r.frames_analyzed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"frame_idx {frame_idx} out of range (0–{r.frames_analyzed - 1}).",
+        )
+
+    try:
+        jpeg = get_frame_jpeg(_fa_tmp_path, frame_idx, width, height)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    stat = r.stats[frame_idx]
+    return FramePageResponse(
+        frame_idx    = frame_idx,
+        total_frames = r.frames_analyzed,
+        jpeg_b64     = jpeg,
+        stat         = {
+            "frame_idx":     stat.frame_idx,
+            "timestamp_s":   stat.timestamp_s,
+            "width":         stat.width,
+            "height":        stat.height,
+            "avg_intensity": stat.avg_intensity,
+            "min_intensity": stat.min_intensity,
+            "max_intensity": stat.max_intensity,
+            "std_intensity": stat.std_intensity,
+            "frame_size_kb": stat.frame_size_kb,
+        },
+    )
+
+
+@app.get("/frames/histogram", response_model=FrameHistogramResponse)
+def frames_histogram(
+    frame_idx: int = Query(0, ge=0),
+    bins:      int = Query(32, ge=8, le=256),
+):
+    """Return grayscale intensity histogram for a single frame (recharts-ready)."""
+    if _fa_last_result is None:
+        raise HTTPException(status_code=404, detail="No frame analysis result available.")
+    if not _fa_tmp_path or not os.path.exists(_fa_tmp_path):
+        raise HTTPException(status_code=404, detail="Source video cleaned up. Re-upload.")
+
+    r = _fa_last_result
+    if frame_idx >= r.frames_analyzed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"frame_idx {frame_idx} out of range (0–{r.frames_analyzed - 1}).",
+        )
+    try:
+        buckets = pixel_histogram(_fa_tmp_path, frame_idx, bins=bins)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return FrameHistogramResponse(frame_idx=frame_idx, buckets=buckets)

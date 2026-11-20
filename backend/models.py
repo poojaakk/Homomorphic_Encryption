@@ -139,7 +139,7 @@ class VideoProcessResponse(BaseModel):
     process_width: int
     process_height: int
     frames_processed: int
-    truncated: bool
+    truncated: bool           # True when source had more frames than MAX_FRAMES
     fps: float
     total_bootstraps: int
     peak_noise: int
@@ -160,3 +160,66 @@ class VideoStatusResponse(BaseModel):
     last_batches: Optional[int] = None
     last_bootstraps: Optional[int] = None
     error: Optional[str] = None
+
+
+# ------------------------------------------------------------------
+# Frame extraction / analysis models
+# ------------------------------------------------------------------
+
+class FrameStatModel(BaseModel):
+    """Grayscale statistics for one extracted frame."""
+    frame_idx:      int
+    timestamp_s:    float
+    width:          int
+    height:         int
+    avg_intensity:  float
+    min_intensity:  int
+    max_intensity:  int
+    std_intensity:  float
+    frame_size_kb:  float
+
+
+class FrameAnalysisInfo(BaseModel):
+    """Video-level metadata returned alongside frame stats."""
+    filename:       str
+    fps:            float
+    total_frames:   int
+    duration_sec:   float
+    width:          int
+    height:         int
+    frames_analyzed: int
+
+
+class FrameAnalysisResponse(BaseModel):
+    """Full response for POST /frames/analyze."""
+    status:         str
+    info:           FrameAnalysisInfo
+    stats:          List[FrameStatModel]
+
+
+class FrameAnalysisStatusResponse(BaseModel):
+    """Returned by GET /frames/analyze/status (live progress)."""
+    analyzing:      bool
+    frames_done:    int
+    total_frames:   int
+    pct_done:       float
+    filename:       Optional[str] = None
+    error:          Optional[str] = None
+
+
+class FramePageResponse(BaseModel):
+    """One page of frame JPEGs returned by GET /frames/page."""
+    frame_idx:   int
+    total_frames: int
+    jpeg_b64:    str          # base64 JPEG of the requested frame
+    stat:        Optional[FrameStatModel] = None
+
+
+class HistogramBucket(BaseModel):
+    intensity: int
+    count:     int
+
+
+class FrameHistogramResponse(BaseModel):
+    frame_idx: int
+    buckets:   List[HistogramBucket]
